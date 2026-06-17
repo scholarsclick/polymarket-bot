@@ -62,11 +62,29 @@ def cmd_run(cfg) -> int:
     return 0
 
 
+def cmd_simulate(cfg, n: int, seed: int) -> int:
+    from polybot.simulate import run_simulation
+
+    print(f"Simulating {n} synthetic crypto candles (seed={seed}, strategy={cfg.strategy})...\n")
+    res = run_simulation(cfg, n_markets=n, seed=seed)
+    print("\n================ SIMULATION SUMMARY ================")
+    print(f" markets simulated : {res.n_markets}")
+    print(f" entries taken     : {res.entries}  ({res.entries / max(res.n_markets,1):.0%} of markets)")
+    print(f" wins / losses     : {res.wins} / {res.losses}   (hit rate {res.hit_rate:.1%})")
+    print(f" total notional    : ${res.notional:.2f}")
+    print(f" realized PnL      : ${res.pnl:+.2f}   (ROI {res.roi:+.1%})")
+    print("===================================================")
+    print("\nNote: synthetic data — illustrates the engine, NOT a forward return estimate.")
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="polybot", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=["run", "discover", "setup"], nargs="?", default="run")
+    parser.add_argument("command", choices=["run", "discover", "setup", "simulate"], nargs="?", default="run")
     parser.add_argument("--config", default="config.yaml", help="path to config YAML")
+    parser.add_argument("--n", type=int, default=50, help="simulate: number of synthetic markets")
+    parser.add_argument("--seed", type=int, default=7, help="simulate: RNG seed")
     parser.add_argument("--live", action="store_true", help="trade with REAL funds")
     parser.add_argument("--dry-run", action="store_true", help="force paper mode")
     parser.add_argument("--log-level", default=None, help="override log level")
@@ -88,6 +106,8 @@ def main(argv=None) -> int:
     if not cfg.dry_run:
         log.warning("LIVE MODE — real orders will be placed with real funds.")
 
+    if args.command == "simulate":
+        return cmd_simulate(cfg, args.n, args.seed)
     return {
         "run": cmd_run,
         "discover": cmd_discover,

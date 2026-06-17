@@ -49,6 +49,7 @@ polybot/
   pricefeed.py         Binance/Coinbase/Kraken spot, candle-open, vol estimate
   gamma.py             market discovery + parsing
   strategy.py          Strategy interface + MomentumStrategy (fair-value model)
+  simulate.py          offline simulation / mini-backtester (no network/keys)
   risk.py              Kelly sizing + risk limits
   clob.py              py-clob-client wrapper (auth, books, orders)
   executor.py          PaperExecutor + LiveExecutor
@@ -81,6 +82,10 @@ exchange (Polymarket's UI does this the first time you trade).
 ```bash
 # List the short-term crypto markets the bot would consider right now
 python run.py discover
+
+# Offline simulation / mini-backtest — drives the REAL strategy+risk+executor
+# over synthetic candles. No network or keys needed; great first run.
+python run.py simulate --n 500 --seed 7
 
 # Run in paper mode (default — no real orders, journals to state/)
 python run.py run
