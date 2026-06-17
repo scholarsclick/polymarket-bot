@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pip install -q -r requirements.txt >/tmp/polybot-setup.log 2>&1 || true"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,10 @@
+# Core Polymarket CLOB SDK
+py-clob-client>=0.34.0
+
+# HTTP + config
+requests>=2.31.0
+PyYAML>=6.0
+python-dotenv>=1.0.0
+
+# Dev / test
+pytest>=8.0.0

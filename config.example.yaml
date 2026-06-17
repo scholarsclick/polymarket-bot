@@ -1,0 +1,62 @@
+# ===========================================================================
+# Polymarket short-term crypto bot — example configuration.
+# Copy to `config.yaml` and tune. `config.yaml` is gitignored.
+# Secrets (private key, API creds) live in `.env`, NOT here.
+# ===========================================================================
+
+# --- Connection ------------------------------------------------------------
+clob_host: "https://clob.polymarket.com"
+gamma_host: "https://gamma-api.polymarket.com"
+chain_id: 137                 # Polygon mainnet
+
+# signature_type: 0 = EOA wallet, 1 = email/Magic proxy, 2 = browser wallet proxy
+signature_type: 1
+# funder: Polymarket proxy address that holds your USDC.
+# Required for signature_type 1 and 2. For type 0 leave blank (uses the EOA).
+funder: ""
+
+# --- Mode ------------------------------------------------------------------
+# true  = paper trading, no real orders are sent (default, safe).
+# false = LIVE trading with real funds. Can also be forced with --live / --dry-run.
+dry_run: true
+
+# --- Which markets to trade ------------------------------------------------
+symbols: ["BTC", "ETH"]            # base assets to look for in up/down markets
+durations_minutes: [5, 15]         # candle lengths to trade (also tries 1, 60 if listed)
+duration_tolerance_seconds: 90     # how loosely to match a market's window to a duration
+
+# Only enter when remaining time to resolution is inside this window.
+# Avoid the very end (no time for edge to realize / fills risky) and the very
+# start (too little signal yet).
+min_seconds_to_resolution: 25
+max_seconds_to_resolution: 780
+
+# --- Price feed ------------------------------------------------------------
+# Spot price sources, tried in order until one responds.
+price_sources: ["binance", "coinbase", "kraken"]
+vol_window_seconds: 300            # rolling window for realized-vol estimate
+vol_floor_annual: 0.40             # floor on annualized vol so the model isn't overconfident
+vol_ceiling_annual: 2.50           # cap to ignore microstructure spikes
+
+# --- Strategy --------------------------------------------------------------
+strategy: "momentum"               # "momentum" (see polybot/strategy.py to add more)
+min_edge: 0.05                     # required (fair - price) edge, after fees, to trade
+max_price: 0.95                    # never pay above this per share
+min_price: 0.05                    # never buy below this (no real upside)
+taker_fee_bps: 0                   # Polymarket taker fee in bps (currently 0); used in edge calc
+
+# --- Risk limits -----------------------------------------------------------
+bankroll_usd: 200.0                # assumed working capital for sizing
+kelly_fraction: 0.25               # fraction of full Kelly to bet (0.25 = quarter Kelly)
+max_position_usd: 25.0             # max notional per market
+max_total_exposure_usd: 100.0      # max notional across all open positions
+max_open_positions: 6
+max_trades_per_market: 1           # one entry per market window
+daily_loss_limit_usd: 50.0         # halt new entries after this realized loss in a day
+max_consecutive_losses: 5          # halt new entries after this many losers in a row
+
+# --- Loop ------------------------------------------------------------------
+poll_interval_seconds: 3           # how often to re-evaluate active markets
+market_refresh_seconds: 30         # how often to re-discover markets from Gamma
+log_level: "INFO"
+state_dir: "state"                 # where paper positions / journal are written

@@ -1,0 +1,33 @@
+# Secrets — never commit
+.env
+*.pem
+*.key
+
+# Local config overrides
+config.yaml
+config.local.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# State / logs
+state/
+logs/
+*.log
+positions.json
+*.db
+
+# Tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
