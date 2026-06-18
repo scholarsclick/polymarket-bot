@@ -213,6 +213,7 @@ class BotRunner:
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        self._force_discover = threading.Event()
         self._engine = None  # live Engine handle
 
     # ----- lifecycle -------------------------------------------------------
@@ -237,6 +238,10 @@ class BotRunner:
                 pass
         with self._lock:
             self.state.running = False
+
+    def request_market_refresh(self) -> None:
+        """Force a Polymarket re-discovery on the next loop (manual button)."""
+        self._force_discover.set()
 
     def snapshot(self) -> BotState:
         """Return a shallow copy safe for the UI to read."""
@@ -420,6 +425,7 @@ class BotRunner:
         closed_trades: deque = deque(maxlen=200)
         opp_log: deque = deque(maxlen=120)
         markets_cache: List = []
+        discovery_report: dict = {}
         last_discover = 0.0
         trade_seq = 0
         poll = max(1.0, min(5.0, cfg.poll_interval_seconds))
@@ -470,21 +476,29 @@ class BotRunner:
                         warning="Live data unavailable — trading paused. " + "; ".join(bad))
                     continue
 
-                # 2) discover Polymarket BTC/ETH 5m & 15m markets
+                # 2) discover Polymarket BTC/ETH 5m & 15m markets (+ diagnostics)
                 poly_health = {"discover_ok": True, "markets": len(markets_cache),
                                "book_ok": None, "error": None}
-                if now - last_discover > cfg.market_refresh_seconds or not markets_cache:
+                forced = self._force_discover.is_set()
+                if forced or now - last_discover > cfg.market_refresh_seconds or not markets_cache:
                     try:
-                        markets_cache = gamma.discover(symbols, cfg.durations_minutes,
-                                                       cfg.duration_tolerance_seconds)
-                        poly_health["discover_ok"] = True
+                        markets_cache, discovery_report = gamma.discover_with_report(
+                            symbols, cfg.durations_minutes, cfg.duration_tolerance_seconds)
+                        poly_health["discover_ok"] = (discovery_report.get("http_status") == 200
+                                                      or bool(discovery_report.get("markets_returned")))
                         poly_health["markets"] = len(markets_cache)
+                        # enrich discovered markets with live book data for the panel
+                        discovery_report["discovered_markets"] = self._enrich_discovered(
+                            gateway, markets_cache, now)
                     except Exception as exc:  # noqa: BLE001
                         markets_cache = markets_cache or []
+                        discovery_report = {"error": str(exc)}
                         poly_health["discover_ok"] = False
                         poly_health["error"] = str(exc)
                         self._set_warning(f"market discovery failed: {exc}")
                     last_discover = now
+                    self._force_discover.clear()
+                poly_health["discovery"] = discovery_report
 
                 risk.consecutive_losses = 0  # independent windows for the demo
                 risk.realized_pnl_today = 0.0
@@ -592,6 +606,27 @@ class BotRunner:
         finally:
             with self._lock:
                 self.state.running = False
+
+    def _enrich_discovered(self, gateway, markets, now, cap: int = 16) -> list:
+        """Attach live YES/NO prices + liquidity + expiry to discovered markets
+        (for the discovery debug panel), for up to `cap` markets."""
+        out = []
+        for m in markets[:cap]:
+            yes = no = liq = None
+            try:
+                uq = gateway.get_quote(m.up_token_id)
+                dq = gateway.get_quote(m.down_token_id)
+                yes, no = uq.best_ask, dq.best_ask
+                liq = sum(v for v in (uq.ask_size, uq.bid_size, dq.ask_size, dq.bid_size) if v)
+            except Exception:  # noqa: BLE001
+                pass
+            out.append({
+                "title": m.question[:60], "symbol": m.symbol,
+                "duration_min": m.duration_minutes, "expiry": m.end_time,
+                "seconds_left": m.seconds_to_resolution(now),
+                "yes": yes, "no": no, "liquidity": liq,
+            })
+        return out
 
     def _set_warning(self, msg: str) -> None:
         with self._lock:

@@ -181,6 +181,58 @@ def _closed_rows(trades):
     return df[cols]
 
 
+def _discovery_panel(disc):
+    if not disc:
+        st.caption("No discovery report yet — waiting for the first market scan…")
+        return
+    if disc.get("error"):
+        st.error(f"Discovery error: {disc['error']}")
+    d1, d2, d3, d4 = st.columns(4)
+    d1.metric("Markets returned", disc.get("markets_returned", 0))
+    d2.metric("Accepted (BTC/ETH 5m/15m)", disc.get("accepted", 0))
+    d3.metric("Filtered out", disc.get("filtered_out", 0))
+    d4.metric("HTTP status", disc.get("http_status") or "—")
+    st.write(f"**Endpoint:** `{disc.get('endpoint','?')}` · "
+             f"**strategy used:** `{disc.get('strategy_used')}`")
+
+    st.write("**Query attempts:**")
+    st.dataframe(pd.DataFrame(disc.get("attempts", [])), hide_index=True, width="stretch")
+
+    reasons = disc.get("reasons", {})
+    if reasons:
+        st.write("**Why markets were filtered (count by reason):**")
+        st.dataframe(pd.DataFrame([{"reason": k, "count": v} for k, v in
+                                  sorted(reasons.items(), key=lambda x: -x[1])],),
+                     hide_index=True, width="stretch")
+
+    cw = disc.get("crypto_titles", [])
+    st.write(f"**BTC/ETH-related markets found ({len(cw)}):**")
+    if cw:
+        cdf = pd.DataFrame(cw)
+        if "expiry" in cdf:
+            cdf["expiry"] = cdf["expiry"].map(lambda t: _hhmmss(t) if t else "—")
+        st.dataframe(cdf, hide_index=True, width="stretch", height=220)
+    else:
+        st.caption("No BTC/ETH markets matched even loosely — the endpoint may be "
+                   "returning unrelated markets, or field names changed (see raw sample).")
+
+    dm = disc.get("discovered_markets", [])
+    if dm:
+        st.write("**Discovered markets — expiry / YES / NO / liquidity:**")
+        ddf = pd.DataFrame(dm)
+        ddf["expiry"] = ddf["expiry"].map(lambda t: _hhmmss(t) if t else "—")
+        for col in ("yes", "no"):
+            ddf[col] = ddf[col].map(lambda p: _f(p))
+        ddf["liquidity"] = ddf["liquidity"].map(lambda v: _f(v, "{:,.0f}"))
+        st.dataframe(ddf, hide_index=True, width="stretch", height=200)
+
+    with st.expander("First 20 titles returned"):
+        st.write(disc.get("first_titles", []))
+    with st.expander("Available fields + raw market sample (verify field names)"):
+        st.write("**Fields present on returned markets:**", disc.get("available_fields", []))
+        st.json(disc.get("raw_sample", {}))
+
+
 def _sim_scanned_rows(scanned):
     cols = ["market", "t_left", "spot", "fair_up", "up_ask", "down_ask", "decision"]
     if not scanned:
@@ -266,8 +318,16 @@ def render_dashboard():
             st.subheader("🕯️ Patterns & structure")
             st.dataframe(_pattern_rows(s.analyses), hide_index=True, width="stretch")
 
-        st.subheader("🎯 Polymarket markets (real)")
+        mc1, mc2 = st.columns([3, 1])
+        mc1.subheader("🎯 Polymarket markets (real)")
+        if mc2.button("🔄 Refresh Markets", width="stretch"):
+            runner.request_market_refresh()
         st.dataframe(_markets_rows(s.scanned), hide_index=True, width="stretch", height=200)
+
+        disc = s.polymarket_health.get("discovery", {})
+        auto_open = bool(s.data_available and not s.scanned)   # exactly the "0 markets" case
+        with st.expander("🔍 Market Discovery Debug", expanded=auto_open):
+            _discovery_panel(disc)
 
         st.subheader("🔭 Opportunity scanner")
         st.dataframe(_opp_rows(s.scanned), hide_index=True, width="stretch", height=200)

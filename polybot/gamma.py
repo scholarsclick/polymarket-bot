@@ -1,12 +1,19 @@
-"""Discover short-term crypto up/down markets via Polymarket's Gamma API."""
+"""Discover short-term crypto up/down markets via Polymarket's Gamma API.
+
+`discover_with_report` returns the eligible markets *and* a detailed diagnostic
+report (counts, per-market filter reasons, sample raw response, etc.) so the
+dashboard can show exactly why markets are or aren't being picked up.
+"""
 
 from __future__ import annotations
 
 import json
 import logging
 import re
+import time
+from collections import Counter
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import requests
 
@@ -23,20 +30,22 @@ _SYMBOL_KEYWORDS = {
     "DOGE": ["dogecoin", "doge"],
 }
 
-_UP_OUTCOMES = {"up", "yes", "higher"}
-_DOWN_OUTCOMES = {"down", "no", "lower"}
+_UP_OUTCOMES = {"up", "yes", "higher", "above"}
+_DOWN_OUTCOMES = {"down", "no", "lower", "below"}
 
-# Questions for these markets look like "Bitcoin Up or Down — ..." / "... higher?"
-_UPDOWN_RE = re.compile(r"up or down|higher or lower|\bup\b.*\bdown\b", re.IGNORECASE)
+# Title hints for these markets (used as a soft signal, not a hard requirement).
+_UPDOWN_RE = re.compile(r"up or down|higher or lower|\bup\b.*\bdown\b|up/down", re.IGNORECASE)
 
 
-def _parse_iso(ts: Optional[str]) -> Optional[float]:
-    if not ts:
+def _parse_iso(ts) -> Optional[float]:
+    if ts is None:
         return None
+    if isinstance(ts, (int, float)):
+        # epoch seconds or ms
+        return ts / 1000.0 if ts > 1e12 else float(ts)
     try:
-        # Gamma returns e.g. "2026-06-17T15:15:00Z"
-        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
-    except ValueError:
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
+    except (ValueError, TypeError):
         return None
 
 
@@ -50,7 +59,6 @@ def _detect_symbol(text: str, allowed: List[str]) -> Optional[str]:
 
 
 def _as_list(raw) -> List:
-    """Gamma sometimes returns list fields as JSON-encoded strings."""
     if raw is None:
         return []
     if isinstance(raw, list):
@@ -64,56 +72,58 @@ def _as_list(raw) -> List:
     return []
 
 
+def _first(raw: dict, *keys):
+    for k in keys:
+        if k in raw and raw[k] not in (None, ""):
+            return raw[k]
+    return None
+
+
+def _matches_duration(seconds: float, durations_minutes: List[int], tol: int) -> bool:
+    return any(abs(seconds - d * 60) <= tol for d in durations_minutes)
+
+
 class GammaClient:
     def __init__(self, host: str = "https://gamma-api.polymarket.com", timeout: float = 8.0):
         self.host = host.rstrip("/")
         self.timeout = timeout
         self._session = requests.Session()
+        self._session.headers.update({"User-Agent": "polybot/0.3"})
 
-    def _get_markets(self, limit: int = 500, offset: int = 0) -> List[dict]:
-        r = self._session.get(
-            f"{self.host}/markets",
-            params={
-                "active": "true",
-                "closed": "false",
-                "archived": "false",
-                "limit": limit,
-                "offset": offset,
-                "order": "endDate",
-                "ascending": "true",
-            },
-            timeout=self.timeout,
-        )
-        r.raise_for_status()
-        data = r.json()
-        return data if isinstance(data, list) else data.get("data", [])
+    # ----- raw fetch -------------------------------------------------------
+    def _request(self, params: dict) -> Tuple[list, Optional[int], str, Optional[str]]:
+        url = f"{self.host}/markets"
+        try:
+            r = self._session.get(url, params=params, timeout=self.timeout)
+            status = r.status_code
+            r.raise_for_status()
+            data = r.json()
+            items = data if isinstance(data, list) else data.get("data", [])
+            return items, status, str(r.url), None
+        except Exception as exc:  # noqa: BLE001
+            resp = getattr(exc, "response", None)
+            status = getattr(resp, "status_code", None)
+            return [], status, url, str(exc)
 
-    def parse_market(
-        self,
-        raw: dict,
-        symbols: List[str],
-        durations_minutes: List[int],
-        duration_tolerance_seconds: int,
-    ) -> Optional[CryptoMarket]:
-        """Turn a raw Gamma market dict into a CryptoMarket, or None if it
-        is not a short-term crypto up/down market we trade."""
-        question = (raw.get("question") or raw.get("title") or "").strip()
-        slug = raw.get("slug", "")
-        if not question:
-            return None
-        if not _UPDOWN_RE.search(question) and "up-or-down" not in slug:
-            return None
+    # ----- classification --------------------------------------------------
+    def classify_market(self, raw: dict, symbols: List[str], durations_minutes: List[int],
+                        duration_tolerance_seconds: int) -> Tuple[Optional[CryptoMarket], str]:
+        """Return (market, reason). `market` is None when filtered; `reason`
+        explains why (or 'ok')."""
+        question = str(_first(raw, "question", "title") or "").strip()
+        slug = str(raw.get("slug", "") or "")
+        if not question and not slug:
+            return None, "no title/slug"
 
         symbol = _detect_symbol(f"{question} {slug}", symbols)
         if not symbol:
-            return None
+            return None, "no BTC/ETH symbol"
 
         token_ids = [str(t) for t in _as_list(raw.get("clobTokenIds"))]
         outcomes = [str(o) for o in _as_list(raw.get("outcomes"))]
         if len(token_ids) != 2 or len(outcomes) != 2:
-            return None
+            return None, f"not binary (outcomes={outcomes or 'n/a'})"
 
-        # Identify which token is the "Up" outcome.
         up_idx = None
         for i, oc in enumerate(outcomes):
             if oc.strip().lower() in _UP_OUTCOMES:
@@ -125,75 +135,141 @@ class GammaClient:
                     up_idx = 1 - i
                     break
         if up_idx is None:
-            return None
+            return None, f"outcomes not up/down|yes/no ({outcomes})"
         down_idx = 1 - up_idx
 
-        end_time = _parse_iso(raw.get("endDate") or raw.get("endDateIso"))
-        start_time = _parse_iso(raw.get("startDate") or raw.get("startDateIso"))
+        end_time = _parse_iso(_first(raw, "endDate", "endDateIso", "end_date_iso"))
         if end_time is None:
-            return None
-        if start_time is None and end_time is not None:
-            # Infer from the closest configured duration if start missing.
+            return None, "no end date"
+        start_time = _parse_iso(_first(raw, "startDate", "startDateIso", "gameStartTime", "start_date_iso"))
+        inferred_start = False
+        if start_time is None:
             start_time = end_time - min(durations_minutes) * 60
+            inferred_start = True
 
-        duration_min = round((end_time - start_time) / 60)
-        if not _matches_duration(end_time - start_time, durations_minutes, duration_tolerance_seconds):
-            return None
+        duration_s = end_time - start_time
+        duration_min = round(duration_s / 60)
+        if not _matches_duration(duration_s, durations_minutes, duration_tolerance_seconds):
+            extra = " (start inferred)" if inferred_start else ""
+            return None, f"duration {duration_min}m not in {durations_minutes}{extra}"
 
         try:
-            tick = float(raw.get("orderPriceMinTickSize") or raw.get("minTickSize") or 0.01)
+            tick = float(_first(raw, "orderPriceMinTickSize", "minTickSize") or 0.01)
         except (TypeError, ValueError):
             tick = 0.01
         try:
-            min_size = float(raw.get("orderMinSize") or raw.get("minimumOrderSize") or 5.0)
+            min_size = float(_first(raw, "orderMinSize", "minimumOrderSize") or 5.0)
         except (TypeError, ValueError):
             min_size = 5.0
 
-        return CryptoMarket(
-            condition_id=raw.get("conditionId") or raw.get("condition_id") or slug,
-            question=question,
-            slug=slug,
-            symbol=symbol,
-            up_token_id=token_ids[up_idx],
-            down_token_id=token_ids[down_idx],
-            start_time=start_time,
-            end_time=end_time,
-            tick_size=tick,
-            min_size=min_size,
-            neg_risk=bool(raw.get("negRisk", False)),
+        market = CryptoMarket(
+            condition_id=str(_first(raw, "conditionId", "condition_id") or slug),
+            question=question or slug, slug=slug, symbol=symbol,
+            up_token_id=token_ids[up_idx], down_token_id=token_ids[down_idx],
+            start_time=start_time, end_time=end_time, tick_size=tick,
+            min_size=min_size, neg_risk=bool(raw.get("negRisk", False)),
         )
+        return market, "ok"
 
-    def discover(
-        self,
-        symbols: List[str],
-        durations_minutes: List[int],
-        duration_tolerance_seconds: int,
-        max_pages: int = 4,
-    ) -> List[CryptoMarket]:
-        """Fetch and filter active short-term crypto up/down markets."""
-        out: List[CryptoMarket] = []
+    # back-compat shim used by older callers/tests
+    def parse_market(self, raw, symbols, durations_minutes, duration_tolerance_seconds):
+        market, _ = self.classify_market(raw, symbols, durations_minutes, duration_tolerance_seconds)
+        return market
+
+    # ----- discovery with diagnostics -------------------------------------
+    def discover_with_report(self, symbols: List[str], durations_minutes: List[int],
+                             duration_tolerance_seconds: int, max_pages: int = 4
+                             ) -> Tuple[List[CryptoMarket], dict]:
+        now = time.time()
+        iso_now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # Try strategies in order; use the first that returns rows. Ordering by
+        # endDate ascending WITH end_date_min surfaces the soonest *upcoming*
+        # markets (the 5m/15m ones) instead of old unresolved markets.
+        strategies = [
+            ("upcoming (end_date_min)", {
+                "active": "true", "closed": "false", "archived": "false",
+                "limit": 500, "end_date_min": iso_now,
+                "order": "endDate", "ascending": "true"}),
+            ("active soonest", {
+                "active": "true", "closed": "false",
+                "limit": 500, "order": "endDate", "ascending": "true"}),
+            ("broad open", {"closed": "false", "limit": 1000}),
+        ]
+
+        attempts = []
+        raws: list = []
+        used = None
+        chosen_url = None
+        chosen_status = None
+        for name, params in strategies:
+            items, status, url, err = self._request(params)
+            attempts.append({"strategy": name, "status": status,
+                             "returned": len(items), "error": err})
+            if items and not raws:
+                raws, used, chosen_url, chosen_status = items, name, url, status
+            # keep going only to record attempts if nothing found yet
+            if raws and items:
+                break
+
+        markets: List[CryptoMarket] = []
+        reasons: Counter = Counter()
+        crypto_titles: list = []
         seen = set()
-        for page in range(max_pages):
-            try:
-                raws = self._get_markets(limit=500, offset=page * 500)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("Gamma fetch failed (page %d): %s", page, exc)
-                break
-            if not raws:
-                break
-            for raw in raws:
-                m = self.parse_market(raw, symbols, durations_minutes, duration_tolerance_seconds)
-                if m and m.condition_id not in seen:
-                    seen.add(m.condition_id)
-                    out.append(m)
-            if len(raws) < 500:
-                break
-        log.info("Discovered %d short-term crypto markets", len(out))
-        return out
+        for raw in raws:
+            market, reason = self.classify_market(raw, symbols, durations_minutes,
+                                                  duration_tolerance_seconds)
+            reasons[reason] += 1
+            # record every BTC/ETH-looking market regardless of acceptance
+            sym = _detect_symbol(f"{raw.get('question','')} {raw.get('slug','')}", symbols)
+            if sym:
+                end_t = _parse_iso(_first(raw, "endDate", "endDateIso"))
+                crypto_titles.append({
+                    "title": str(_first(raw, "question", "title") or raw.get("slug", ""))[:70],
+                    "symbol": sym,
+                    "outcomes": _as_list(raw.get("outcomes")),
+                    "expiry": end_t,
+                    "reason": reason,
+                })
+            if market and market.condition_id not in seen and market.end_time > now:
+                seen.add(market.condition_id)
+                markets.append(market)
+
+        report = {
+            "ts": now,
+            "endpoint": f"{self.host}/markets",
+            "attempts": attempts,
+            "strategy_used": used,
+            "http_status": chosen_status,
+            "params_used": chosen_url,
+            "markets_returned": len(raws),
+            "accepted": len(markets),
+            "filtered_out": len(raws) - len(markets),
+            "reasons": dict(reasons),
+            "first_titles": [str(_first(r, "question", "title") or r.get("slug", ""))[:80]
+                             for r in raws[:20]],
+            "crypto_titles": crypto_titles[:60],
+            "available_fields": sorted(raws[0].keys()) if raws else [],
+            "raw_sample": _trim_sample(raws[0]) if raws else {},
+            "accepted_markets": [{
+                "title": m.question[:70], "symbol": m.symbol,
+                "duration_min": m.duration_minutes, "expiry": m.end_time,
+                "seconds_left": m.seconds_to_resolution(now),
+            } for m in markets],
+        }
+        log.info("Discovery: %d returned, %d accepted, %d crypto-related (strategy=%s)",
+                 len(raws), len(markets), len(crypto_titles), used)
+        return markets, report
+
+    def discover(self, symbols, durations_minutes, duration_tolerance_seconds, max_pages: int = 4):
+        markets, _ = self.discover_with_report(symbols, durations_minutes,
+                                               duration_tolerance_seconds, max_pages)
+        return markets
 
 
-def _matches_duration(seconds: float, durations_minutes: List[int], tol: int) -> bool:
-    for d in durations_minutes:
-        if abs(seconds - d * 60) <= tol:
-            return True
-    return False
+def _trim_sample(raw: dict) -> dict:
+    """A compact sample of a raw market for field-name verification."""
+    keep = ["question", "title", "slug", "conditionId", "clobTokenIds", "outcomes",
+            "outcomePrices", "startDate", "endDate", "endDateIso", "active", "closed",
+            "liquidity", "volume", "orderPriceMinTickSize", "orderMinSize", "negRisk"]
+    return {k: raw.get(k) for k in keep if k in raw}

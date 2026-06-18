@@ -150,6 +150,12 @@ What live mode does:
   spot, PnL, win/loss, and the entry & close reasons.
 - **Debug panel** — raw per-source spot responses, candle source + close time,
   Polymarket API status, and the `simulator active` flag.
+- **Market Discovery Debug** — number of markets returned, accepted and filtered,
+  the **exact reason each market was filtered**, the first 20 titles, all
+  BTC/ETH-related markets found, discovered markets' expiry/YES/NO/liquidity, the
+  available field names and a **raw market sample** (to verify the API schema),
+  plus a **🔄 Refresh Markets** button. It auto-expands when live data is healthy
+  but zero markets are found, so you can see immediately why.
 
 **Safety (enforced):**
 

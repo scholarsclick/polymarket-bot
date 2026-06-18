@@ -1,10 +1,52 @@
 import json
+import time
 
 from polybot.gamma import GammaClient
 
 
 def _client():
     return GammaClient()
+
+
+def test_classify_reasons():
+    c = _client()
+    # accepted
+    m, why = c.classify_market(_raw(), ["BTC", "ETH"], [5, 15], 90)
+    assert m is not None and why == "ok"
+    # wrong duration
+    _, why = c.classify_market(_raw(endDate="2026-06-17T16:00:00Z"), ["BTC"], [5, 15], 90)
+    assert "duration" in why and "60m" in why
+    # no symbol
+    _, why = c.classify_market(_raw(question="Will the Fed cut?", slug="fed"), ["BTC"], [5, 15], 90)
+    assert why == "no BTC/ETH symbol"
+    # not binary
+    _, why = c.classify_market(_raw(outcomes=json.dumps(["A", "B", "C"])), ["BTC"], [5, 15], 90)
+    assert "not binary" in why
+    # yes/no accepted
+    m, why = c.classify_market(_raw(outcomes=json.dumps(["Yes", "No"])), ["BTC"], [5, 15], 90)
+    assert m is not None and why == "ok"
+
+
+def test_discover_with_report(monkeypatch):
+    c = _client()
+    soon = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 300))
+    rows = [
+        _raw(endDate=soon, startDate=time.strftime("%Y-%m-%dT%H:%M:%SZ",
+             time.gmtime(time.time() + 300 - 900))),                       # ok 15m
+        _raw(question="Ethereum Up or Down?", slug="eth-up-or-down",
+             endDate=soon, startDate=time.strftime("%Y-%m-%dT%H:%M:%SZ",
+             time.gmtime(time.time() + 300 - 300)), outcomes=json.dumps(["Up", "Down"])),  # ETH 5m
+        _raw(question="Will the Fed cut rates?", slug="fed"),              # filtered: no symbol
+    ]
+    monkeypatch.setattr(c, "_request", lambda params: (rows, 200, "http://x", None))
+    markets, report = c.discover_with_report(["BTC", "ETH"], [5, 15], 120)
+    assert report["http_status"] == 200
+    assert report["markets_returned"] == 3
+    assert report["accepted"] >= 1
+    assert "no BTC/ETH symbol" in report["reasons"]
+    assert len(report["crypto_titles"]) >= 1     # BTC/ETH ones recorded
+    assert report["available_fields"]            # field names captured
+    assert report["raw_sample"]                  # sample present
 
 
 def _raw(**over):
