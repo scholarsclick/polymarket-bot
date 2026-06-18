@@ -60,11 +60,31 @@ def test_rsi_overbought_blocks_long_entry():
         candle_open=100.0, spot=100.6, vol_per_sec=0.0003,
         up_ask=0.55, down_ask=0.45, min_edge=0.04,
         avoid_rsi_extremes=True, rsi_overbought=70.0, rsi_oversold=20.0)
-    assert opp.action == "no_trade"
-    assert "overbought" in opp.reason.lower()
+    assert opp.action != "enter"          # blocked from entering
+    assert any("overbought" in b.lower() for b in opp.blockers)
     # guard off -> the same setup trades
     opp2 = decide_opportunity(
         a, "BTC up or down 5m", 5, 120.0,
         candle_open=100.0, spot=100.6, vol_per_sec=0.0003,
         up_ask=0.55, down_ask=0.45, min_edge=0.04, avoid_rsi_extremes=False)
     assert opp2.action == "enter"
+    assert opp2.confidence_pct >= 80      # high-confidence setup
+
+
+def test_high_confidence_only_blocks_weak_setup():
+    # mild uptrend, thin edge -> below the 85% bar -> not an enter, blocker listed
+    a = analyze("BTC", "5m", _trend_candles("up"))
+    opp = decide_opportunity(
+        a, "BTC up or down 5m", 5, 120.0,
+        candle_open=100.0, spot=100.02, vol_per_sec=0.001,
+        up_ask=0.52, down_ask=0.50, min_edge=0.03,
+        high_confidence_only=True, min_confidence_pct=85.0)
+    assert opp.action != "enter"
+    assert 0 <= opp.confidence_pct <= 100
+    # turning the gate off should not add a low-confidence blocker
+    opp2 = decide_opportunity(
+        a, "BTC up or down 5m", 5, 120.0,
+        candle_open=100.0, spot=100.02, vol_per_sec=0.001,
+        up_ask=0.52, down_ask=0.50, min_edge=0.03,
+        high_confidence_only=False)
+    assert not any("low confidence" in b for b in opp2.blockers)

@@ -48,7 +48,7 @@ class Config:
     kelly_fraction: float = 0.25
     max_position_usd: float = 25.0
     max_total_exposure_usd: float = 100.0
-    max_open_positions: int = 12
+    max_open_positions: int = 0          # 0 = unlimited; exposure/daily-stop are the real caps
     max_trades_per_market: int = 1
     daily_loss_limit_usd: float = 50.0   # absolute daily loss halt (used if pct <= 0)
     daily_loss_limit_pct: float = 0.5    # halt for the day after losing this fraction of capital
@@ -64,8 +64,13 @@ class Config:
     volatility_exit_mult: float = 3.0    # vol >= entry_vol * this triggers the volatility exit
 
     # intelligence: entry-quality filters and adaptive sizing
-    max_spread: float = 0.10             # skip markets whose book spread exceeds this (0 disables)
-    min_liquidity: float = 0.0           # skip markets with less than this much book size (0 disables)
+    high_confidence_only: bool = True    # only enter when confidence clears the bar
+    min_confidence_pct: float = 80.0     # combined-confidence threshold (%)
+    late_window_seconds: float = 30.0    # avoid the final N seconds…
+    late_confidence_pct: float = 95.0    # …unless confidence is at least this high
+    max_data_staleness_seconds: float = 20.0   # skip if spot/candle data is older than this
+    max_spread: float = 0.08             # skip markets whose book spread exceeds this (0 disables)
+    min_liquidity: float = 50.0          # skip markets with less than this much book size (0 disables)
     confidence_sizing: bool = True       # scale size by signal confidence
     confidence_sizing_min_mult: float = 0.5
     confidence_sizing_max_mult: float = 1.5

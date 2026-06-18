@@ -129,3 +129,18 @@ def test_entry_quality_block_spread_and_liquidity():
     assert _entry_quality_block(0.20, 500, cfg)            # wide spread -> blocked
     assert _entry_quality_block(0.02, 50, cfg)             # thin liquidity -> blocked
     assert _entry_quality_block(0.02, 500, cfg) is None    # good book -> allowed
+
+
+def test_confidence_buckets():
+    from polybot.exits import confidence_buckets
+    closed = [
+        {"confidence_pct": 95, "result": "win", "pnl": 4.0},
+        {"confidence_pct": 92, "result": "loss", "pnl": -3.0},
+        {"confidence_pct": 84, "result": "win", "pnl": 2.0},
+        {"confidence_pct": 60, "result": "loss", "pnl": -1.0},
+    ]
+    b = {r["bucket"]: r for r in confidence_buckets(closed)}
+    assert b["90-100"]["count"] == 2 and b["90-100"]["win_rate"] == 0.5
+    assert b["80-89"]["count"] == 1 and b["80-89"]["win_rate"] == 1.0
+    assert b["<70"]["count"] == 1
+    assert abs(b["90-100"]["pnl"] - 1.0) < 1e-9

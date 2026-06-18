@@ -129,8 +129,36 @@ class Opportunity:
     fair: float
     market_price: Optional[float]
     edge: float
-    confidence: int        # net confluence score
+    confidence: int        # net confluence score (integer)
     reason: str
+    confidence_pct: float = 0.0          # 0..100 combined confidence
+    blockers: list = None                # active blockers (why it's not an enter)
+
+    def __post_init__(self):
+        if self.blockers is None:
+            self.blockers = []
+
+
+def confidence_components(analysis: Analysis, side: Side, edge: float, min_edge: float):
+    """Return (pillars dict, pct 0..1) for the four agreement pillars."""
+    up = side is Side.UP
+    fav = analysis.bull_score if up else analysis.bear_score
+    opp = analysis.bear_score if up else analysis.bull_score
+    total = fav + opp
+
+    trend_p = 1.0 if analysis.trend == ("bullish" if up else "bearish") else 0.0
+    ind_p = (fav / total) if total else 0.5
+    pdir = analysis.pattern_direction()
+    if pdir == ("bullish" if up else "bearish"):
+        pat_p = 1.0
+    elif pdir == "neutral":
+        pat_p = 0.5
+    else:
+        pat_p = 0.0
+    edge_p = max(0.0, min(1.0, edge / (2 * min_edge))) if min_edge > 0 else (1.0 if edge > 0 else 0.0)
+
+    pct = 0.30 * trend_p + 0.30 * ind_p + 0.15 * pat_p + 0.25 * edge_p
+    return {"trend": trend_p, "indicators": ind_p, "pattern": pat_p, "edge": edge_p}, pct
 
 
 def decide_opportunity(
@@ -148,17 +176,16 @@ def decide_opportunity(
     avoid_rsi_extremes: bool = False,
     rsi_overbought: float = 80.0,
     rsi_oversold: float = 20.0,
+    high_confidence_only: bool = True,
+    min_confidence_pct: float = 80.0,
+    model_prob: Optional[float] = None,
 ) -> Opportunity:
-    """Combine trend + indicators + pattern with the market's YES/NO price.
-
-    Returns an Opportunity whose `action` is:
-      - "enter"     trend/indicators/pattern agree AND edge >= min_edge
-      - "possible"  direction agrees but edge is thin / data marginal
-      - "no_trade"  weak edge or no directional agreement
-    """
+    """Quality-gated decision. Enters ONLY when trend + indicators + pattern +
+    market-price edge agree and the combined confidence clears the bar; lists
+    every active blocker otherwise. There is no trade-count target — weak setups
+    are simply skipped."""
     fair_up = fair_up_probability(spot, candle_open, max(0.0, seconds_left), vol_per_sec)
 
-    # directional bias from the analysis
     if analysis.trend == "bullish":
         side, fair, ask = Side.UP, fair_up, up_ask
     elif analysis.trend == "bearish":
@@ -167,42 +194,44 @@ def decide_opportunity(
         return Opportunity(analysis.symbol, market_name, duration_min, seconds_left,
                            "no_trade", None, fair_up, up_ask, 0.0,
                            analysis.bull_score - analysis.bear_score,
-                           "trend neutral — no directional agreement")
+                           "neutral / choppy — no directional agreement",
+                           confidence_pct=0.0, blockers=["neutral/choppy"])
 
     confidence = abs(analysis.bull_score - analysis.bear_score)
     edge = (fair - ask) if ask is not None else 0.0
+    pillars, pct01 = confidence_components(analysis, side, edge, min_edge)
+    if model_prob is not None:
+        pct01 = 0.5 * pct01 + 0.5 * model_prob     # blend in the learned model
+    pct = round(pct01 * 100, 1)
+
     pat_names = ", ".join(f"{n}:{d}" for n, d in analysis.patterns) or "none"
-    base = (f"{analysis.symbol} {analysis.trend} "
-            f"[{', '.join(analysis.signals) or 'n/a'}] | patterns: {pat_names} | "
-            f"spot={spot:,.2f} open={candle_open:,.2f} "
-            f"fair={fair:.3f} ask={ask if ask is not None else float('nan'):.3f} "
-            f"edge={edge:+.3f} | {market_name}")
+    base = (f"{analysis.symbol} {analysis.trend} conf={pct:.0f}% "
+            f"[{', '.join(analysis.signals) or 'n/a'}] patterns:{pat_names} "
+            f"spot={spot:,.2f} open={candle_open:,.2f} edge={edge:+.3f} | {market_name}")
 
+    blockers = []
     if not analysis.ok or ask is None:
-        return Opportunity(analysis.symbol, market_name, duration_min, seconds_left,
-                           "no_trade", side, fair, ask, edge, confidence,
-                           "insufficient data / no book — " + base)
-
-    # intelligence: don't buy into momentum exhaustion (overbought longs /
-    # oversold shorts) — these mean-revert and trap entries.
+        blockers.append("insufficient data")
+    if pillars["indicators"] < 0.5 or pillars["pattern"] == 0.0:
+        blockers.append("conflicting indicators")
     if avoid_rsi_extremes and analysis.rsi is not None:
         if side is Side.UP and analysis.rsi >= rsi_overbought:
-            return Opportunity(analysis.symbol, market_name, duration_min, seconds_left,
-                               "no_trade", side, fair, ask, edge, confidence,
-                               f"RSI overbought {analysis.rsi:.0f} — exhaustion — " + base)
+            blockers.append(f"RSI overbought {analysis.rsi:.0f}")
         if side is Side.DOWN and analysis.rsi <= rsi_oversold:
-            return Opportunity(analysis.symbol, market_name, duration_min, seconds_left,
-                               "no_trade", side, fair, ask, edge, confidence,
-                               f"RSI oversold {analysis.rsi:.0f} — exhaustion — " + base)
+            blockers.append(f"RSI oversold {analysis.rsi:.0f}")
+    if edge < min_edge:
+        blockers.append("weak edge")
+    if high_confidence_only and pct < min_confidence_pct:
+        blockers.append(f"low confidence {pct:.0f}%<{min_confidence_pct:.0f}%")
 
-    if confidence >= min_confidence and edge >= min_edge:
+    def _opp(action, reason):
         return Opportunity(analysis.symbol, market_name, duration_min, seconds_left,
-                           "enter", side, fair, ask, edge, confidence,
-                           "AGREE trend+indicators+market — " + base)
-    if confidence >= min_confidence and edge > 0:
-        return Opportunity(analysis.symbol, market_name, duration_min, seconds_left,
-                           "possible", side, fair, ask, edge, confidence,
-                           "possible (edge thin) — " + base)
-    return Opportunity(analysis.symbol, market_name, duration_min, seconds_left,
-                       "no_trade", side, fair, ask, edge, confidence,
-                       "no trade (weak edge) — " + base)
+                           action, side, fair, ask, edge, confidence, reason,
+                           confidence_pct=pct, blockers=blockers)
+
+    if not blockers:
+        return _opp("enter", "✅ trend+indicators+pattern+edge agree — " + base)
+    if edge > 0 and "conflicting indicators" not in blockers and "insufficient data" not in blockers:
+        return _opp("possible", "possible (" + ", ".join(blockers) + ") — " + base)
+    return _opp("no_trade", "no trade (" + ", ".join(blockers) + ") — " + base)
+

@@ -90,6 +90,7 @@ def make_early_closed_trade(t: dict, exit_price: float, spot_at_close: float,
         "close_price": exit_price,
         "entry_spot": t["candle_open"], "exit_spot": spot_at_close,
         "pnl": pnl, "correct": correct, "result": "win" if correct else "loss",
+        "confidence_pct": t.get("confidence_pct", 0.0),
         "reason_entry": t["reason_entry"], "reason_close": reason,
         "exit_type": exit_type,
     }
@@ -131,7 +132,7 @@ def make_closed_trade(t: dict, exit_px: float, now: float) -> dict:
         # underlying prices: the asset spot at entry (candle open) vs resolution
         "entry_spot": t["candle_open"], "exit_spot": exit_px,
         "pnl": pnl, "correct": won, "result": "win" if won else "loss",
-        "exit_type": "resolution",
+        "exit_type": "resolution", "confidence_pct": t.get("confidence_pct", 0.0),
         "reason_entry": t["reason_entry"],
         "reason_close": (f"resolved {'UP' if resolved_up else 'DOWN'}: "
                          f"{t['symbol']} {t['candle_open']:,.2f} → {exit_px:,.2f}; "
@@ -177,6 +178,7 @@ class BotState:
     hold_vs_early: dict = field(default_factory=dict)            # early-exit vs hold-to-resolution
     model_stats: dict = field(default_factory=dict)             # self-learning model status
     entry_diagnostics: dict = field(default_factory=dict)      # why entries are / aren't happening
+    confidence_buckets: List[dict] = field(default_factory=list)  # performance by confidence band
     debug: dict = field(default_factory=dict)                    # raw source statuses for the debug panel
 
     @property
@@ -313,6 +315,7 @@ class BotRunner:
             copy.hold_vs_early = dict(s.hold_vs_early)
             copy.model_stats = dict(s.model_stats)
             copy.entry_diagnostics = dict(s.entry_diagnostics)
+            copy.confidence_buckets = list(s.confidence_buckets)
             copy.spot_health = dict(s.spot_health)
             copy.candle_health = dict(s.candle_health)
             copy.polymarket_health = dict(s.polymarket_health)
@@ -450,6 +453,7 @@ class BotRunner:
         from .gamma import GammaClient
         from .learning import TradeLearner, featurize
         from .marketdata import MarketDataFeed
+        from .strategy import fair_up_probability
 
         cfg = self.cfg
         cfg.dry_run = not self.execute_orders
@@ -490,6 +494,7 @@ class BotRunner:
         closed_trades: deque = deque(maxlen=200)
         opp_log: deque = deque(maxlen=120)
         traded_markets: set = set()           # one entry per market window
+        would_enter_markets: set = set()      # strong setups we blocked (skipped opportunities)
         cf_watch: list = []                   # early-exited trades awaiting resolution
         cf_stats = {"count": 0, "early_total": 0.0, "hold_total": 0.0}  # hold-vs-early
         entry_times: deque = deque(maxlen=5000)   # for trades/hour pacing
@@ -611,19 +616,49 @@ class BotRunner:
                                                 dn_q.ask_size, dn_q.bid_size) if v)
 
                     a = analyses[m.symbol]
+                    # self-learning model probability (computed first so it can
+                    # feed the confidence blend in decide_opportunity)
+                    features = model_prob = None
+                    side_pre = (Side.UP if a.trend == "bullish"
+                                else Side.DOWN if a.trend == "bearish" else None)
+                    if side_pre is not None:
+                        fu = fair_up_probability(spot, candle_open, max(0.0, sec_left), vol_ps)
+                        ask_pre = up_q.best_ask if side_pre is Side.UP else dn_q.best_ask
+                        fair_pre = fu if side_pre is Side.UP else 1.0 - fu
+                        edge_pre = (fair_pre - ask_pre) if ask_pre is not None else 0.0
+                        features = featurize(a, side_pre.value, edge_pre, sec_left, m.duration_minutes)
+                        if cfg.learning_enabled:
+                            model_prob = learner.prob(features)
+
                     opp = decide_opportunity(
                         a, m.question, m.duration_minutes, sec_left,
                         candle_open, spot, vol_ps, up_q.best_ask, dn_q.best_ask,
                         cfg.min_edge, min_confidence=self.min_confidence,
                         avoid_rsi_extremes=cfg.avoid_rsi_extremes,
-                        rsi_overbought=cfg.rsi_overbought, rsi_oversold=cfg.rsi_oversold)
-                    # self-learning: features + model probability for this setup
-                    features = model_prob = None
-                    if opp.side is not None:
-                        features = featurize(a, opp.side.value, opp.edge, sec_left,
-                                             m.duration_minutes)
-                        if cfg.learning_enabled:
-                            model_prob = learner.prob(features)
+                        rsi_overbought=cfg.rsi_overbought, rsi_oversold=cfg.rsi_oversold,
+                        high_confidence_only=cfg.high_confidence_only,
+                        min_confidence_pct=cfg.min_confidence_pct, model_prob=model_prob)
+
+                    # --- runtime blockers (book quality, staleness, timing, exposure) ---
+                    blockers = list(opp.blockers)
+                    if cfg.max_spread and spread is not None and spread > cfg.max_spread:
+                        blockers.append("wide spread")
+                    if cfg.min_liquidity and (liquidity or 0) < cfg.min_liquidity:
+                        blockers.append("low liquidity")
+                    data_stale = (now - cs[-1].open_time) > (tf_seconds + cfg.max_data_staleness_seconds)
+                    if data_stale:
+                        blockers.append("stale data")
+                    if (sec_left < cfg.late_window_seconds
+                            and opp.confidence_pct < cfg.late_confidence_pct):
+                        blockers.append("too late")
+                    remaining_exp = cfg.max_total_exposure_usd - risk.current_exposure()
+                    if remaining_exp <= 0:
+                        blockers.append("max exposure reached")
+                    halt_now = risk.halted()
+                    if halt_now:
+                        blockers.append("daily stop")
+                    if m.condition_id in traded_markets:
+                        blockers.append("already traded")
 
                     opp_row = {
                         "time": now, "symbol": m.symbol, "market": m.question[:48],
@@ -631,8 +666,9 @@ class BotRunner:
                         "expiry": m.end_time, "yes_price": yes_price, "no_price": no_price,
                         "spread": spread, "liquidity": liquidity,
                         "action": opp.action, "side": opp.side.value if opp.side else "—",
-                        "confidence": opp.confidence, "edge": opp.edge, "fair": opp.fair,
-                        "model": model_prob, "reason": opp.reason,
+                        "confidence": opp.confidence, "confidence_pct": opp.confidence_pct,
+                        "edge": opp.edge, "fair": opp.fair, "model": model_prob,
+                        "blockers": blockers, "reason": opp.reason,
                     }
                     scanned.append(opp_row)
 
@@ -676,33 +712,26 @@ class BotRunner:
                                                  "early_pnl": rec["pnl"]})
                                 opp_log.appendleft({**opp_row, "action": f"EXIT {decision.type}"})
 
-                    # --- entry (one per market window) ---
+                    # --- entry: take it ONLY when there are zero blockers ---
                     in_window = sec_left >= cfg.min_seconds_to_resolution
-                    block = _entry_quality_block(spread, liquidity, cfg)
-                    # Model only BLOCKS when learning_gate is on — and even then it
-                    # explores (takes a fraction anyway) so it never freezes itself.
-                    if (not block and cfg.learning_gate and model_prob is not None
+                    if not in_window:
+                        blockers.append("out of window")
+                    already_open = m.condition_id in open_trades
+                    # model gate (opt-in) as an extra blocker with exploration
+                    if (cfg.learning_gate and model_prob is not None
                             and model_prob < cfg.learning_min_prob
                             and random.random() > cfg.learning_explore_rate):
-                        block = f"model P {model_prob:.0%}<{cfg.learning_min_prob:.0%}"
+                        blockers.append("model low")
+
                     if opp.action == "enter":
                         enter_signals += 1
-                        if block:
-                            skip_tally[block.split(":")[0].split(" ")[0]] = \
-                                skip_tally.get(block.split(":")[0].split(" ")[0], 0) + 1
-                            opp_row["action"] = "no_trade"
-                            opp_row["reason"] = f"skip: {block} | " + opp_row["reason"]
-                        elif m.condition_id in traded_markets:
-                            skip_tally["already_traded"] = skip_tally.get("already_traded", 0) + 1
-                        elif not in_window:
-                            skip_tally["out_of_window"] = skip_tally.get("out_of_window", 0) + 1
-                        elif risk.can_enter_basic() is not None:
-                            r = risk.can_enter_basic()
-                            skip_tally[r.split(" ")[0]] = skip_tally.get(r.split(" ")[0], 0) + 1
-                    if (opp.action == "enter" and not block
-                            and m.condition_id not in open_trades
-                            and m.condition_id not in traded_markets and in_window
-                            and risk.can_enter_basic() is None):
+                        for b in blockers:
+                            skip_tally[b] = skip_tally.get(b, 0) + 1
+                        if blockers:
+                            would_enter_markets.add(m.condition_id)   # a real opportunity we passed
+                            opp_row["action"] = "blocked"
+
+                    if opp.action == "enter" and not blockers and not already_open:
                         from .models import Signal
                         sig = Signal(market=m, side=opp.side, token_id=m.token_id(opp.side),
                                      fair_value=opp.fair, price=opp.market_price, edge=opp.edge,
@@ -710,7 +739,7 @@ class BotRunner:
                         avail = up_q.ask_size if opp.side is Side.UP else dn_q.ask_size
                         scale = _confidence_scale(opp.confidence, cfg)
                         if model_prob is not None and cfg.learning_size_weight:
-                            scale *= max(0.5, min(1.5, model_prob / 0.5))  # 0.5→0.5x, 0.75→1.5x
+                            scale *= max(0.5, min(1.5, model_prob / 0.5))
                         sig = risk.size_signal(sig, available_size=avail, confidence_scale=scale)
                         if sig.size > 0:
                             pos = executor.place(sig)
@@ -726,6 +755,7 @@ class BotRunner:
                                     "size": sig.size, "entry_price": sig.price,
                                     "mark": sig.price, "peak": sig.price, "upnl": 0.0,
                                     "entry_vol": vol_ps, "trail": None,
+                                    "confidence_pct": opp.confidence_pct,
                                     "candle_open": candle_open, "end_time": m.end_time,
                                     "reason_entry": opp.reason, "position": pos,
                                     "features": features,
@@ -779,12 +809,14 @@ class BotRunner:
                 diag = {
                     "scanned": len(scanned), "enter_signals": enter_signals,
                     "open": len([1 for _ in open_trades]),
-                    "max_open": cfg.max_open_positions,
+                    "max_open": cfg.max_open_positions or "∞",
                     "exposure": risk.current_exposure(), "max_exposure": cfg.max_total_exposure_usd,
-                    "skipped": skip_tally,
+                    "blockers": skip_tally,
+                    "skipped_opportunities": len(would_enter_markets - traded_markets),
                     "trades_per_hour": round(rate_per_hr, 1),
-                    "projected_per_day": int(rate_per_hr * 24),
                     "symbols": symbols,
+                    "high_confidence_only": cfg.high_confidence_only,
+                    "min_confidence_pct": cfg.min_confidence_pct,
                     "daily_pnl": risk.realized_pnl_today,
                     "daily_limit": risk.daily_loss_limit(),
                     "halted": halt_reason,
@@ -832,7 +864,7 @@ class BotRunner:
                      opp_log, timeframe, data_available, warning, scanned=None,
                      debug=None, poly_health=None, cf_stats=None, model_stats=None,
                      entry_diag=None) -> None:
-        from .exits import exit_performance
+        from .exits import confidence_buckets, exit_performance
         closed = list(closed_trades)
         wins = sum(1 for t in closed if t["result"] == "win")
         losses = sum(1 for t in closed if t["result"] == "loss")
@@ -862,6 +894,7 @@ class BotRunner:
             s.wins, s.losses, s.realized = wins, losses, realized
             s.unrealized = unrealized
             s.exit_perf = exit_performance(closed)
+            s.confidence_buckets = confidence_buckets(closed)
             if model_stats is not None:
                 s.model_stats = model_stats
             if entry_diag is not None:

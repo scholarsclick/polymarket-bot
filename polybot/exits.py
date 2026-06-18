@@ -75,6 +75,20 @@ def evaluate_exit(*, side: str, entry_price: float, mark: Optional[float],
     return ExitDecision(False)
 
 
+def confidence_buckets(closed_trades) -> list:
+    """Performance grouped by entry confidence: <70, 70-79, 80-89, 90-100."""
+    bands = [("<70", 0, 70), ("70-79", 70, 80), ("80-89", 80, 90), ("90-100", 90, 1e9)]
+    out = []
+    for label, lo, hi in bands:
+        rows = [t for t in closed_trades if lo <= t.get("confidence_pct", 0) < hi]
+        n = len(rows)
+        wins = sum(1 for t in rows if t.get("result") == "win")
+        pnl = sum(t.get("pnl", 0.0) for t in rows)
+        out.append({"bucket": label, "count": n,
+                    "win_rate": (wins / n) if n else 0.0, "pnl": pnl})
+    return out
+
+
 def exit_performance(closed_trades) -> list:
     """Aggregate closed trades by exit type: count, win rate, avg & total PnL."""
     buckets: dict = {}

@@ -86,4 +86,4 @@ def test_model_gate_off_by_default():
     assert c.learning_gate is False
     assert c.learning_size_weight is True
     assert c.learning_explore_rate > 0     # exploration when gating is on
-    assert c.max_open_positions >= 12      # more concurrent trades
+    assert c.max_open_positions == 0       # unlimited; exposure/daily-stop are the caps

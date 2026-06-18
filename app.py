@@ -60,26 +60,19 @@ with st.sidebar:
         "Symbols", SUPPORTED_SYMBOLS, default=SUPPORTED_SYMBOLS,
         help="More symbols = more markets = more trades. All on by default.")
 
-    st.subheader("Trade frequency")
-    _PRESETS = {
-        "Balanced (quality)": dict(min_edge=0.05, min_conf=3, max_spread=0.10),
-        "Aggressive": dict(min_edge=0.03, min_conf=2, max_spread=0.15),
-        "Max frequency (≈500/day)": dict(min_edge=0.015, min_conf=2, max_spread=0.30),
-    }
-    preset = st.selectbox("Preset", list(_PRESETS) + ["Custom"], index=2)
-    if preset == "Custom":
-        min_edge = st.slider("Edge threshold", 0.0, 0.20, float(cfg.min_edge), 0.005)
-        min_conf = st.slider("Min confidence", 1, 6, 2, 1)
-        max_spread = st.slider("Max spread", 0.0, 0.50, float(cfg.max_spread), 0.05)
-    else:
-        p = _PRESETS[preset]
-        min_edge, min_conf, max_spread = p["min_edge"], p["min_conf"], p["max_spread"]
-        st.caption(f"edge ≥ {min_edge} · confidence ≥ {min_conf} · spread ≤ {max_spread}")
+    st.subheader("Signal quality (no trade-count target)")
+    high_conf = st.checkbox("High-confidence only", value=cfg.high_confidence_only,
+                            help="Only enter when trend + indicators + pattern + edge all "
+                                 "agree above the confidence bar. Unlimited trades when "
+                                 "confident; weak setups skipped.")
+    min_conf_pct = st.slider("Min confidence %", 50, 99, int(cfg.min_confidence_pct), 1)
+    min_edge = st.slider("Edge threshold", 0.0, 0.20, float(cfg.min_edge), 0.005)
+    max_spread = st.slider("Max spread", 0.0, 0.50, float(cfg.max_spread), 0.01)
+    min_liq = st.number_input("Min liquidity", min_value=0.0, value=float(cfg.min_liquidity), step=10.0)
 
-    st.subheader("Risk")
+    st.subheader("Risk (always enforced)")
     bankroll = st.number_input("Bankroll ($)", min_value=10.0, value=float(cfg.bankroll_usd), step=10.0)
     max_pos = st.number_input("Max position ($)", min_value=1.0, value=float(cfg.max_position_usd), step=5.0)
-    max_open = st.number_input("Max concurrent trades", min_value=1, value=int(cfg.max_open_positions), step=1)
     max_exp = st.number_input("Max total exposure ($)", min_value=1.0,
                               value=float(cfg.max_total_exposure_usd), step=25.0)
     kelly = st.slider("Kelly fraction", 0.05, 1.0, float(cfg.kelly_fraction), 0.05)
@@ -105,8 +98,10 @@ if start:
         cfg.bankroll_usd = bankroll
         cfg.min_edge = min_edge
         cfg.max_spread = max_spread
+        cfg.min_liquidity = min_liq
+        cfg.high_confidence_only = high_conf
+        cfg.min_confidence_pct = float(min_conf_pct)
         cfg.max_position_usd = max_pos
-        cfg.max_open_positions = int(max_open)
         cfg.max_total_exposure_usd = max_exp
         cfg.kelly_fraction = kelly
         cfg.daily_loss_limit_pct = daily_stop_pct / 100.0
@@ -116,7 +111,7 @@ if start:
             mode="paper" if mode_label == MODE_SIM else "live",
             execute_orders=(mode_label == MODE_REAL and enable_real),
             timeframe=timeframe,
-            min_confidence=min_conf,
+            min_confidence=2,
         )
         runner.start()
         st.session_state.runner = runner
@@ -169,17 +164,23 @@ def _markets_rows(scanned):
 
 
 def _opp_rows(scanned):
-    cols = ["market", "t_left", "action", "conf", "model", "side", "edge", "reason"]
+    cols = ["market", "t_left", "action", "conf%", "model", "side", "edge", "blockers", "reason"]
     if not scanned:
         return pd.DataFrame(columns=cols)
-    df = pd.DataFrame(scanned)
-    df["t_left"] = df["seconds_left"].map(lambda s: f"{s:.0f}s")
-    df["conf"] = df.get("confidence", 0)
-    df["model"] = df["model"].map(lambda p: f"{p:.0%}" if p is not None else "—") if "model" in df else "—"
-    df["edge"] = df["edge"].map(lambda e: f"{e:+.3f}")
-    df["action"] = df["action"].map({"enter": "🟢 TRADE", "possible": "🟡 possible",
-                                     "no_trade": "⚪ NO TRADE", "ENTER": "🟢 ENTER"}).fillna(df["action"])
-    return df[cols]
+    rows = []
+    amap = {"enter": "🟢 TRADE", "possible": "🟡 possible", "no_trade": "⚪ no trade",
+            "blocked": "🚫 blocked", "ENTER": "🟢 ENTER"}
+    for o in scanned:
+        rows.append({
+            "market": o.get("market"), "t_left": f"{o.get('seconds_left', 0):.0f}s",
+            "action": amap.get(o.get("action"), o.get("action")),
+            "conf%": f"{o.get('confidence_pct', 0):.0f}%",
+            "model": (f"{o['model']:.0%}" if o.get("model") is not None else "—"),
+            "side": o.get("side"), "edge": f"{o.get('edge', 0):+.3f}",
+            "blockers": ", ".join(o.get("blockers", []) or []) or "—",
+            "reason": o.get("reason", ""),
+        })
+    return pd.DataFrame(rows)[cols]
 
 
 def _open_rows(trades):
@@ -354,21 +355,21 @@ def render_dashboard():
             elif dl > 0:
                 st.caption(f"Daily stop-loss: day PnL **${dp:+.2f}** of allowed **-${dl:.2f}** "
                            f"({(-dp / dl * 100) if dl else 0:.0f}% used)")
-            open_n, max_open = d.get("open", 0), d.get("max_open", 0)
+            open_n, max_open = d.get("open", 0), d.get("max_open", "∞")
             exp, max_exp = d.get("exposure", 0), d.get("max_exposure", 0)
-            skipped = d.get("skipped", {})
-            tph = d.get("trades_per_hour", 0)
-            proj = d.get("projected_per_day", 0)
-            on_track = "✅" if proj >= 500 else "🐢"
-            msg = (f"Pace: **{tph}/hr → ~{proj}/day** {on_track} (target 500) · "
-                   f"symbols **{len(d.get('symbols', []))}** · "
-                   f"scanned **{d.get('scanned', 0)}** · signals **{d.get('enter_signals', 0)}** · "
-                   f"open **{open_n}/{max_open}** · exposure **${exp:.0f}/${max_exp:.0f}**")
-            if skipped:
-                msg += " · skipped: " + ", ".join(f"{k}×{v}" for k, v in skipped.items())
+            blockers = d.get("blockers", {})
+            mode_txt = (f"HIGH-CONFIDENCE-ONLY ≥{d.get('min_confidence_pct', 0):.0f}%"
+                        if d.get("high_confidence_only") else "all directional setups")
+            msg = (f"Mode: **{mode_txt}** · scanned **{d.get('scanned', 0)}** · "
+                   f"strong signals **{d.get('enter_signals', 0)}** · "
+                   f"skipped opportunities **{d.get('skipped_opportunities', 0)}** · "
+                   f"open **{open_n}/{max_open}** · exposure **${exp:.0f}/${max_exp:.0f}** · "
+                   f"~{d.get('trades_per_hour', 0)}/hr")
             st.info(msg, icon="🔎")
-            if open_n >= max_open:
-                st.caption("⚠️ At max open positions — raise `max_open_positions` for more concurrent trades.")
+            if blockers:
+                st.caption("🚧 Active blockers: " +
+                           " · ".join(f"**{k}** ×{v}" for k, v in
+                                      sorted(blockers.items(), key=lambda x: -x[1])))
             if max_exp and exp >= max_exp * 0.99:
                 st.caption("⚠️ At max exposure — raise `max_total_exposure_usd` / `bankroll_usd`.")
     else:
@@ -425,22 +426,29 @@ def render_dashboard():
                        "result = prediction correct")
             st.dataframe(_closed_rows(s.closed_trades), hide_index=True, width="stretch", height=220)
 
-        st.subheader("🏁 Exit performance")
-        ep1, ep2 = st.columns([2, 1])
-        with ep1:
-            st.caption("Which exit method performs best (by avg PnL per trade)")
-            st.dataframe(_exit_perf_rows(s.exit_perf), hide_index=True, width="stretch")
-        with ep2:
-            hve = s.hold_vs_early
-            if hve.get("count"):
-                st.metric("Early-exit total", f"${hve['early_total']:+,.2f}",
-                          f"{hve['count']} compared")
-                st.metric("Would-be hold total", f"${hve['hold_total']:+,.2f}")
-                winner = "Early exits ✅" if hve["better"] == "early" else "Hold-to-resolution ✅"
-                st.success(f"Better so far: **{winner}**")
+        st.subheader("🎯 Performance by confidence")
+        cb1, cb2 = st.columns([2, 1])
+        with cb1:
+            st.caption("Win rate and PnL grouped by the entry confidence score")
+            buckets = s.confidence_buckets
+            if buckets:
+                bdf = pd.DataFrame([{
+                    "confidence": b["bucket"], "trades": b["count"],
+                    "win_rate": f"{b['win_rate']:.0%}", "pnl": f"{b['pnl']:+.2f}",
+                } for b in buckets])
+                st.dataframe(bdf, hide_index=True, width="stretch")
             else:
-                st.caption("Hold-vs-early comparison appears once early-exited "
-                           "markets reach their resolution.")
+                st.caption("Fills in as trades close.")
+        with cb2:
+            # high-confidence-only (≥80) aggregate
+            hi = [b for b in s.confidence_buckets if b["bucket"] in ("80-89", "90-100")]
+            n = sum(b["count"] for b in hi)
+            wins = sum(round(b["win_rate"] * b["count"]) for b in hi)
+            pnl = sum(b["pnl"] for b in hi)
+            st.metric("High-conf trades (≥80%)", n, f"{(wins / n * 100) if n else 0:.0f}% win")
+            st.metric("High-conf PnL", f"${pnl:+,.2f}")
+            st.metric("Skipped opportunities",
+                      s.entry_diagnostics.get("skipped_opportunities", 0))
 
         st.subheader("🧠 Self-learning model")
         ms = s.model_stats

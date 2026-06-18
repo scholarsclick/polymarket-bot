@@ -128,14 +128,25 @@ shows simulator prices. The simulator lives only in its own test mode and is
 clearly flagged (`simulator active: TRUE`). In live mode the debug panel always
 shows `simulator active: FALSE`.
 
-**Trade frequency.** The sidebar has a **Symbols** picker (BTC, ETH, SOL, XRP,
-DOGE, BNB, **HYPE** — all on by default; more symbols ⇒ more markets ⇒ more
-trades) and a **frequency preset**
-(Balanced / Aggressive / **Max frequency ≈500/day**) that sets edge, confidence
-and spread filters, plus **max concurrent trades** and **max exposure** inputs.
-A live **pace meter** shows trades/hour and projected/day vs a 500 target, and a
-diagnostics banner shows exactly which limit is throttling entries. Looser
-filters ⇒ more trades but lower win rate — tune to taste.
+**Quality gate, not a quantity target.** There is **no** max-trades-per-hour,
+per-session, or cooldown limit — the bot takes **unlimited trades when it is
+genuinely confident** and **skips everything weak**. `max_open_positions: 0`
+(unlimited); **exposure + the daily stop-loss are the real bounds**, never a
+trade count.
+
+- **High-confidence-only** (sidebar, default ON, `min_confidence_pct` 80%):
+  enters only when **trend + indicators + pattern + Polymarket price edge all
+  agree** above the bar; conflicting signals are skipped.
+- **Stronger filters** (all kept as safety): wide-spread, low-liquidity,
+  stale-feed, neutral/choppy candle, and "avoid the final 30s unless confidence
+  is ≥ `late_confidence_pct`".
+- **Symbols** picker (BTC, ETH, SOL, XRP, DOGE, BNB, HYPE — all on by default;
+  more symbols ⇒ more genuine opportunities).
+- The diagnostics banner shows the mode, **strong signals**, **skipped
+  opportunities**, and a live **active-blockers** tally (low confidence, wide
+  spread, low liquidity, stale data, max exposure, conflicting indicators…).
+  The **Performance by confidence** panel breaks win-rate & PnL into 70–79 /
+  80–89 / 90–100 buckets and shows high-confidence-only results.
 
 What live mode does:
 
