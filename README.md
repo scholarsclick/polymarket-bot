@@ -50,6 +50,7 @@ polybot/
   gamma.py             market discovery + parsing
   strategy.py          Strategy interface + MomentumStrategy (fair-value model)
   simulate.py          offline simulation / mini-backtester (no network/keys)
+  dashboard.py         live streaming dashboard (real-time feed + equity curve)
   risk.py              Kelly sizing + risk limits
   clob.py              py-clob-client wrapper (auth, books, orders)
   executor.py          PaperExecutor + LiveExecutor
@@ -82,6 +83,10 @@ exchange (Polymarket's UI does this the first time you trade).
 ```bash
 # List the short-term crypto markets the bot would consider right now
 python run.py discover
+
+# Live dashboard — watch the engine trade in real time with a streaming feed,
+# stats panel, and ASCII equity curve. Offline (simulated feed); no keys needed.
+python run.py dashboard --seconds 60
 
 # Offline simulation / mini-backtest — drives the REAL strategy+risk+executor
 # over synthetic candles. No network or keys needed; great first run.

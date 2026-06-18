@@ -81,10 +81,11 @@ def cmd_simulate(cfg, n: int, seed: int) -> int:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="polybot", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=["run", "discover", "setup", "simulate"], nargs="?", default="run")
+    parser.add_argument("command", choices=["run", "discover", "setup", "simulate", "dashboard"], nargs="?", default="run")
     parser.add_argument("--config", default="config.yaml", help="path to config YAML")
     parser.add_argument("--n", type=int, default=50, help="simulate: number of synthetic markets")
-    parser.add_argument("--seed", type=int, default=7, help="simulate: RNG seed")
+    parser.add_argument("--seed", type=int, default=7, help="simulate/dashboard: RNG seed")
+    parser.add_argument("--seconds", type=float, default=60.0, help="dashboard: how long to run")
     parser.add_argument("--live", action="store_true", help="trade with REAL funds")
     parser.add_argument("--dry-run", action="store_true", help="force paper mode")
     parser.add_argument("--log-level", default=None, help="override log level")
@@ -106,6 +107,10 @@ def main(argv=None) -> int:
     if not cfg.dry_run:
         log.warning("LIVE MODE — real orders will be placed with real funds.")
 
+    if args.command == "dashboard":
+        from polybot.dashboard import run_dashboard
+        run_dashboard(cfg, seconds=args.seconds, seed=(args.seed if args.seed != 7 else None))
+        return 0
     if args.command == "simulate":
         return cmd_simulate(cfg, args.n, args.seed)
     return {
