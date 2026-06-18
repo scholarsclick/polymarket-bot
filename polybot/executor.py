@@ -46,6 +46,14 @@ class PaperExecutor(Executor):
         )
         return pos
 
+    def close_at(self, pos: Position, price: float, exit_type: str = "early") -> None:
+        """Early exit: sell the held token at `price` (its current bid)."""
+        pos.pnl = pos.size * (price - pos.entry_price)
+        pos.open = False
+        self._journal("EXIT", None, pos, extra={"exit_type": exit_type, "exit_price": price})
+        log.info("[PAPER] EXIT %s %s %.0f @ %.3f — pnl=%.2f (%s)",
+                 pos.market.symbol, pos.side.value, pos.size, price, pos.pnl, exit_type)
+
     def settle(self, pos: Position, resolved_up: bool) -> None:
         won = (resolved_up and pos.side is Side.UP) or (not resolved_up and pos.side is Side.DOWN)
         payoff = pos.size * (1.0 if won else 0.0)

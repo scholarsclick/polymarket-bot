@@ -55,6 +55,21 @@ max_trades_per_market: 1           # one entry per market window
 daily_loss_limit_usd: 50.0         # halt new entries after this realized loss in a day
 max_consecutive_losses: 5          # halt new entries after this many losers in a row
 
+# --- Exits / trade management ----------------------------------------------
+# Early exits SELL the position back into the book to lock gains / cut losses,
+# instead of always holding to resolution.
+enable_early_exits: true
+take_profit_price: 0.92            # take profit when the held token reaches this price
+take_profit_pct: 0.0              # OR when gain vs entry >= this fraction (0 = disabled)
+stop_loss_pct: 0.35               # stop out when loss vs entry >= this fraction (0 = disabled)
+stop_loss_price: 0.0              # OR when price <= this absolute (0 = disabled)
+trailing_stop_pct: 0.15           # exit when price falls this far from its peak (0 = disabled)
+time_exit_seconds: 30             # exit this many seconds before resolution (0 = disabled)
+confidence_exit: true             # exit if trend/indicators flip against the position
+exit_confidence_min: 2            # opposing confidence required for a confidence exit
+volatility_exit: true             # exit if volatility spikes against a losing position
+volatility_exit_mult: 3.0         # vol >= entry_vol * this triggers the volatility exit
+
 # --- Loop ------------------------------------------------------------------
 poll_interval_seconds: 3           # how often to re-evaluate active markets
 market_refresh_seconds: 30         # how often to re-discover markets from Gamma

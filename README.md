@@ -157,6 +157,37 @@ What live mode does:
   plus a **🔄 Refresh Markets** button. It auto-expands when live data is healthy
   but zero markets are found, so you can see immediately why.
 
+### Trade management & early exits
+
+By default positions are no longer just held to resolution — they can be closed
+early by **selling the held token back into the book** to lock gains or cut
+losses. Each open position is marked every loop to its current sellable price
+(best bid) and checked against, in priority order:
+
+| Exit | Config | Behaviour |
+|---|---|---|
+| Take profit | `take_profit_price` / `take_profit_pct` | exit when price ≥ level, or gain ≥ % |
+| Stop loss | `stop_loss_pct` / `stop_loss_price` | exit when loss ≥ %, or price ≤ level |
+| Trailing stop | `trailing_stop_pct` | exit when price falls % from its peak |
+| Time exit | `time_exit_seconds` | exit N seconds before resolution |
+| Confidence exit | `confidence_exit` | exit if trend/indicators flip against the side |
+| Volatility exit | `volatility_exit` | exit if vol spikes against a losing position |
+
+So your scenario — *buy YES at 0.50, it runs to 0.95* — now triggers a
+take-profit (default `take_profit_price: 0.92`) and books ~+0.42/share instead
+of risking a round-trip to resolution. All exit knobs live in `config.yaml`;
+set a value to `0` to disable that exit.
+
+The dashboard shows, per open trade, the **mark price, unrealized PnL, and live
+TP / SL / trailing levels**; closed trades show the **exit type and exit
+reason**; and an **Exit performance** panel ranks exit methods by average PnL and
+compares **early-exit vs hold-to-resolution** (it replays what each early-exited
+market would have settled at).
+
+> Early exits sell at the current book price, so realised PnL =
+> `size × (exit_price − entry_price)`. In live-real-orders mode this is a real
+> FAK sell order; in paper mode it's simulated at the same price.
+
 **Safety (enforced):**
 
 - Default mode is Live Data Paper Trading; **no private key required**.

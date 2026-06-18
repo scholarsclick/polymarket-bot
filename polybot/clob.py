@@ -114,6 +114,22 @@ class ClobGateway:
         )
         return self._client.post_order(order, OrderType.FAK)
 
+    def sell_marketable(self, token_id: str, price: float, size: float) -> dict:
+        """Place a marketable SELL limit (Fill-And-Kill) at `price` for `size`
+        shares — used to close a position early. Returns the post_order response."""
+        from py_clob_client.clob_types import OrderArgs, OrderType, PartialCreateOrderOptions
+        from py_clob_client.order_builder.constants import SELL
+
+        tick = self.get_tick_size(token_id)
+        neg_risk = self.get_neg_risk(token_id)
+        price = round_to_tick(price, tick)
+
+        order = self._client.create_order(
+            OrderArgs(token_id=token_id, price=price, size=size, side=SELL),
+            PartialCreateOrderOptions(tick_size=_tick_str(tick), neg_risk=neg_risk),
+        )
+        return self._client.post_order(order, OrderType.FAK)
+
     def balance_allowance(self):
         from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
         return self._client.get_balance_allowance(

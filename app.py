@@ -153,32 +153,49 @@ def _opp_rows(scanned):
 
 
 def _open_rows(trades):
-    cols = ["id", "entry", "market", "side", "size", "entry", "mark", "uPnL", "reason"]
+    cols = ["id", "entry", "market", "side", "size", "entry_price", "mark",
+            "uPnL", "TP", "SL", "trail", "reason"]
     if not trades:
-        return pd.DataFrame(columns=["id", "entry_time", "market", "side", "size",
-                                     "entry_price", "mark", "uPnL", "reason"])
-    df = pd.DataFrame(trades)
-    df["entry_time"] = df["entry_time"].map(_hhmmss)
-    df["entry_price"] = df["entry_price"].map(lambda p: _f(p))
-    df["mark"] = df.get("mark").map(lambda p: _f(p)) if "mark" in df else "—"
-    df["uPnL"] = df.get("upnl").map(lambda p: f"{p:+.2f}") if "upnl" in df else "—"
-    df["reason"] = df["reason_entry"]
-    return df[["id", "entry_time", "market", "side", "size", "entry_price", "mark", "uPnL", "reason"]]
+        return pd.DataFrame(columns=cols)
+    rows = []
+    for t in trades:
+        rows.append({
+            "id": t.get("id"), "entry": _hhmmss(t.get("entry_time")),
+            "market": t.get("market"), "side": t.get("side"), "size": t.get("size"),
+            "entry_price": _f(t.get("entry_price")), "mark": _f(t.get("mark")),
+            "uPnL": f"{t.get('upnl', 0.0):+.2f}",
+            "TP": _f(t.get("tp")), "SL": _f(t.get("sl")), "trail": _f(t.get("trail")),
+            "reason": t.get("reason_entry", ""),
+        })
+    return pd.DataFrame(rows)[cols]
 
 
 def _closed_rows(trades):
     cols = ["entry", "close", "market", "side", "entry_price", "close_price",
-            "settle_spot", "pnl", "result", "reason_entry", "reason_close"]
+            "pnl", "result", "exit_type", "reason_close"]
     if not trades:
         return pd.DataFrame(columns=cols)
-    df = pd.DataFrame(trades)
-    df["entry"] = df["entry_time"].map(_hhmmss)
-    df["close"] = df["close_time"].map(_hhmmss)
-    df["entry_price"] = df["entry_price"].map(lambda p: _f(p))
-    df["close_price"] = df.get("close_price").map(lambda p: _f(p)) if "close_price" in df else "—"
-    df["settle_spot"] = df["exit_price"].map(lambda p: f"${p:,.2f}")
-    df["pnl"] = df["pnl"].map(lambda p: f"{p:+.2f}")
-    return df[cols]
+    rows = []
+    for t in trades:
+        rows.append({
+            "entry": _hhmmss(t.get("entry_time")), "close": _hhmmss(t.get("close_time")),
+            "market": t.get("market"), "side": t.get("side"),
+            "entry_price": _f(t.get("entry_price")), "close_price": _f(t.get("close_price")),
+            "pnl": f"{t.get('pnl', 0.0):+.2f}", "result": t.get("result"),
+            "exit_type": t.get("exit_type", "resolution"),
+            "reason_close": t.get("reason_close", ""),
+        })
+    return pd.DataFrame(rows)[cols]
+
+
+def _exit_perf_rows(perf):
+    cols = ["exit_type", "count", "win_rate", "avg_pnl", "pnl"]
+    if not perf:
+        return pd.DataFrame(columns=cols)
+    rows = [{"exit_type": p["exit_type"], "count": p["count"],
+             "win_rate": f"{p['win_rate']:.0%}", "avg_pnl": f"{p['avg_pnl']:+.2f}",
+             "pnl": f"{p['pnl']:+.2f}"} for p in perf]
+    return pd.DataFrame(rows)[cols]
 
 
 def _discovery_panel(disc):
@@ -296,12 +313,13 @@ def render_dashboard():
         st.caption("🧪 SIMULATOR TEST MODE — prices below are **synthetic** (not live).")
 
     # ---- account metrics ----
-    m1, m2, m3, m4, m5 = st.columns(5)
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
     m1.metric("Balance", f"${s.equity:,.2f}", f"{s.equity - s.bankroll:+,.2f}")
     m2.metric("Total entries", s.entries)
     m3.metric("Win rate", f"{s.win_rate:.0%}", f"{s.wins}W / {s.losses}L")
     m4.metric("Realized PnL", f"${s.realized:+,.2f}")
-    m5.metric("Open exposure", f"${s.exposure:,.2f}")
+    m5.metric("Unrealized PnL", f"${s.unrealized:+,.2f}")
+    m6.metric("Open exposure", f"${s.exposure:,.2f}")
 
     st.subheader("📈 Equity curve")
     if len(s.equity_curve) > 1:
@@ -335,10 +353,30 @@ def render_dashboard():
         o1, o2 = st.columns(2)
         with o1:
             st.subheader(f"📂 Open trades ({len(s.open_trades)})")
+            st.caption("mark = current sellable price · TP/SL/trail = live exit levels")
             st.dataframe(_open_rows(s.open_trades), hide_index=True, width="stretch", height=220)
         with o2:
             st.subheader(f"✅ Closed trades ({len(s.closed_trades)})")
+            st.caption("exit_type: take_profit / stop_loss / trailing_stop / time_exit / "
+                       "confidence_exit / volatility_exit / resolution")
             st.dataframe(_closed_rows(s.closed_trades), hide_index=True, width="stretch", height=220)
+
+        st.subheader("🏁 Exit performance")
+        ep1, ep2 = st.columns([2, 1])
+        with ep1:
+            st.caption("Which exit method performs best (by avg PnL per trade)")
+            st.dataframe(_exit_perf_rows(s.exit_perf), hide_index=True, width="stretch")
+        with ep2:
+            hve = s.hold_vs_early
+            if hve.get("count"):
+                st.metric("Early-exit total", f"${hve['early_total']:+,.2f}",
+                          f"{hve['count']} compared")
+                st.metric("Would-be hold total", f"${hve['hold_total']:+,.2f}")
+                winner = "Early exits ✅" if hve["better"] == "early" else "Hold-to-resolution ✅"
+                st.success(f"Better so far: **{winner}**")
+            else:
+                st.caption("Hold-vs-early comparison appears once early-exited "
+                           "markets reach their resolution.")
 
         st.subheader("📜 Opportunity log")
         st.dataframe(_opp_rows(list(s.opportunities)), hide_index=True, width="stretch", height=180)

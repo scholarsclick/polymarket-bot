@@ -72,6 +72,23 @@ def _trade_view(t: dict) -> dict:
     return {k: v for k, v in t.items() if k != "position"}
 
 
+def make_early_closed_trade(t: dict, exit_price: float, now: float,
+                            exit_type: str, reason: str) -> dict:
+    """Closed-trade record for an EARLY exit (sold back into the book at
+    `exit_price`). PnL = size * (exit_price - entry_price)."""
+    pnl = t["size"] * (exit_price - t["entry_price"])
+    return {
+        "entry_time": t["entry_time"], "close_time": now,
+        "market": t["market"], "symbol": t["symbol"],
+        "duration_min": t["duration_min"], "side": t["side"],
+        "entry_price": t["entry_price"], "close_price": exit_price,
+        "exit_price": exit_price, "pnl": pnl,
+        "result": "win" if pnl > 0 else "loss",
+        "reason_entry": t["reason_entry"], "reason_close": reason,
+        "exit_type": exit_type,
+    }
+
+
 def make_closed_trade(t: dict, exit_px: float, now: float) -> dict:
     """Build the closed-trade record (full lifecycle + reasons). Pure/testable."""
     resolved_up = exit_px > t["candle_open"]
@@ -85,6 +102,7 @@ def make_closed_trade(t: dict, exit_px: float, now: float) -> dict:
         "duration_min": t["duration_min"], "side": t["side"],
         "entry_price": t["entry_price"], "close_price": close_price,
         "exit_price": exit_px, "pnl": pnl, "result": "win" if won else "loss",
+        "exit_type": "resolution",
         "reason_entry": t["reason_entry"],
         "reason_close": (f"market resolved {'UP' if resolved_up else 'DOWN'} "
                          f"(open {t['candle_open']:,.2f} → close {exit_px:,.2f}); "
@@ -124,6 +142,9 @@ class BotState:
     open_trades: List[dict] = field(default_factory=list)
     closed_trades: List[dict] = field(default_factory=list)
     opportunities: List[dict] = field(default_factory=list)      # opportunity log (newest first)
+    unrealized: float = 0.0                                       # sum of open-trade uPnL
+    exit_perf: List[dict] = field(default_factory=list)          # performance by exit type
+    hold_vs_early: dict = field(default_factory=dict)            # early-exit vs hold-to-resolution
     debug: dict = field(default_factory=dict)                    # raw source statuses for the debug panel
 
     @property
@@ -256,6 +277,8 @@ class BotRunner:
             copy.open_trades = list(s.open_trades)
             copy.closed_trades = list(s.closed_trades)
             copy.opportunities = list(s.opportunities)
+            copy.exit_perf = list(s.exit_perf)
+            copy.hold_vs_early = dict(s.hold_vs_early)
             copy.spot_health = dict(s.spot_health)
             copy.candle_health = dict(s.candle_health)
             copy.polymarket_health = dict(s.polymarket_health)
@@ -389,6 +412,7 @@ class BotRunner:
         from .analysis import analyze, decide_opportunity
         from .clob import ClobGateway
         from .executor import LiveExecutor, PaperExecutor
+        from .exits import evaluate_exit, exit_levels
         from .gamma import GammaClient
         from .marketdata import MarketDataFeed
 
@@ -424,6 +448,9 @@ class BotRunner:
         open_trades: Dict[str, dict] = {}     # condition_id -> trade dict
         closed_trades: deque = deque(maxlen=200)
         opp_log: deque = deque(maxlen=120)
+        traded_markets: set = set()           # one entry per market window
+        cf_watch: list = []                   # early-exited trades awaiting resolution
+        cf_stats = {"count": 0, "early_total": 0.0, "hold_total": 0.0}  # hold-vs-early
         markets_cache: List = []
         discovery_report: dict = {}
         last_discover = 0.0
@@ -531,18 +558,11 @@ class BotRunner:
                     liquidity = sum(v for v in (up_q.ask_size, up_q.bid_size,
                                                 dn_q.ask_size, dn_q.bid_size) if v)
 
+                    a = analyses[m.symbol]
                     opp = decide_opportunity(
-                        analyses[m.symbol], m.question, m.duration_minutes, sec_left,
+                        a, m.question, m.duration_minutes, sec_left,
                         candle_open, spot, vol_ps, up_q.best_ask, dn_q.best_ask,
                         cfg.min_edge, min_confidence=self.min_confidence)
-                    # mark open trades for this market to current mid
-                    if m.condition_id in open_trades:
-                        t = open_trades[m.condition_id]
-                        q = up_q if t["side"] == "UP" else dn_q
-                        mark = q.mid if q.mid is not None else q.best_bid
-                        if mark is not None:
-                            t["mark"] = mark
-                            t["upnl"] = t["size"] * (mark - t["entry_price"])
                     opp_row = {
                         "time": now, "symbol": m.symbol, "market": m.question[:48],
                         "duration_min": m.duration_minutes, "seconds_left": sec_left,
@@ -554,9 +574,48 @@ class BotRunner:
                     }
                     scanned.append(opp_row)
 
-                    already = m.condition_id in open_trades
+                    # --- manage an open trade on this market (early exits) ---
+                    if m.condition_id in open_trades:
+                        t = open_trades[m.condition_id]
+                        q = up_q if t["side"] == "UP" else dn_q
+                        mark = q.best_bid if q.best_bid is not None else q.mid  # sellable price
+                        if mark is not None:
+                            t["mark"] = mark
+                            t["peak"] = max(t.get("peak", t["entry_price"]), mark)
+                            t["upnl"] = t["size"] * (mark - t["entry_price"])
+                            lv = exit_levels(t["entry_price"], t["peak"], cfg)
+                            t["tp"], t["sl"], t["trail"] = lv["tp"], lv["sl"], lv["trail"]
+                            decision = evaluate_exit(
+                                side=t["side"], entry_price=t["entry_price"], mark=mark,
+                                peak_mark=t["peak"], seconds_left=sec_left,
+                                vol_per_sec=vol_ps, entry_vol=t.get("entry_vol"),
+                                trend=a.trend, confidence=abs(a.bull_score - a.bear_score),
+                                cfg=cfg)
+                            if decision.should_exit:
+                                t = open_trades.pop(m.condition_id)
+                                if self.execute_orders:
+                                    try:
+                                        gateway.sell_marketable(t["position"].token_id, mark, t["size"])
+                                    except Exception as exc:  # noqa: BLE001
+                                        poly_health["error"] = f"sell failed: {exc}"
+                                    t["position"].open = False
+                                    t["position"].pnl = t["size"] * (mark - t["entry_price"])
+                                else:
+                                    executor.close_at(t["position"], mark, decision.type)
+                                risk.register_settlement(t["position"])
+                                rec = make_early_closed_trade(t, mark, now, decision.type, decision.reason)
+                                closed_trades.appendleft(rec)
+                                cf_watch.append({"end_time": t["end_time"],
+                                                 "candle_open": t["candle_open"], "side": t["side"],
+                                                 "size": t["size"], "entry_price": t["entry_price"],
+                                                 "symbol": t["symbol"], "exit_type": decision.type,
+                                                 "early_pnl": rec["pnl"]})
+                                opp_log.appendleft({**opp_row, "action": f"EXIT {decision.type}"})
+
+                    # --- entry (one per market window) ---
                     in_window = sec_left >= cfg.min_seconds_to_resolution
-                    if (opp.action == "enter" and not already and in_window
+                    if (opp.action == "enter" and m.condition_id not in open_trades
+                            and m.condition_id not in traded_markets and in_window
                             and risk.can_enter_basic() is None):
                         from .models import Signal
                         sig = Signal(market=m, side=opp.side, token_id=m.token_id(opp.side),
@@ -568,13 +627,15 @@ class BotRunner:
                             pos = executor.place(sig)
                             if pos:
                                 risk.register_entry(pos)
+                                traded_markets.add(m.condition_id)
                                 trade_seq += 1
                                 open_trades[m.condition_id] = {
                                     "id": trade_seq, "entry_time": now,
                                     "market": m.question[:48], "symbol": m.symbol,
                                     "duration_min": m.duration_minutes, "side": opp.side.value,
                                     "size": sig.size, "entry_price": sig.price,
-                                    "mark": sig.price, "upnl": 0.0,
+                                    "mark": sig.price, "peak": sig.price, "upnl": 0.0,
+                                    "entry_vol": vol_ps, "tp": None, "sl": None, "trail": None,
                                     "candle_open": candle_open, "end_time": m.end_time,
                                     "reason_entry": opp.reason, "position": pos,
                                 }
@@ -597,9 +658,29 @@ class BotRunner:
                     closed_trades.appendleft({k: v for k, v in rec.items()
                                               if k not in ("resolved_up", "won")})
 
+                # 5) mature counterfactuals: what would early exits have made if held?
+                still_watch = []
+                for cf in cf_watch:
+                    if now < cf["end_time"]:
+                        still_watch.append(cf)
+                        continue
+                    settle_px = feed.get_spot(cf["symbol"]) or prices.get(cf["symbol"], {}).get("price")
+                    if settle_px is None:
+                        still_watch.append(cf)
+                        continue
+                    resolved_up = settle_px > cf["candle_open"]
+                    won = ((resolved_up and cf["side"] == "UP")
+                           or (not resolved_up and cf["side"] == "DOWN"))
+                    hold_pnl = cf["size"] * ((1.0 if won else 0.0) - cf["entry_price"])
+                    cf_stats["count"] += 1
+                    cf_stats["early_total"] += cf["early_pnl"]
+                    cf_stats["hold_total"] += hold_pnl
+                cf_watch[:] = still_watch
+
                 self._commit_live(risk, feed, prices, analyses, open_trades, closed_trades,
                                   opp_log, tf, data_available=True, debug=debug,
-                                  poly_health=poly_health, warning=None, scanned=scanned)
+                                  poly_health=poly_health, warning=None, scanned=scanned,
+                                  cf_stats=cf_stats)
         except Exception as exc:  # noqa: BLE001
             with self._lock:
                 self.state.error = f"live loop error: {exc}"
@@ -634,11 +715,13 @@ class BotRunner:
 
     def _commit_live(self, risk, feed, prices, analyses, open_trades, closed_trades,
                      opp_log, timeframe, data_available, warning, scanned=None,
-                     debug=None, poly_health=None) -> None:
+                     debug=None, poly_health=None, cf_stats=None) -> None:
+        from .exits import exit_performance
         closed = list(closed_trades)
         wins = sum(1 for t in closed if t["result"] == "win")
         losses = sum(1 for t in closed if t["result"] == "loss")
         realized = sum(t["pnl"] for t in closed)
+        unrealized = sum(t.get("upnl", 0.0) for t in open_trades.values())
         equity = self.cfg.bankroll_usd + realized
         with self._lock:
             s = self.state
@@ -661,6 +744,16 @@ class BotRunner:
                 s.opportunities = list(opp_log)
             s.entries = len(open_trades) + len(closed)
             s.wins, s.losses, s.realized = wins, losses, realized
+            s.unrealized = unrealized
+            s.exit_perf = exit_performance(closed)
+            if cf_stats and cf_stats["count"]:
+                s.hold_vs_early = {
+                    "count": cf_stats["count"],
+                    "early_total": cf_stats["early_total"],
+                    "hold_total": cf_stats["hold_total"],
+                    "better": ("early" if cf_stats["early_total"] >= cf_stats["hold_total"]
+                               else "hold"),
+                }
             s.equity = equity
             s.peak = max(s.peak, equity)
             s.exposure = risk.current_exposure()

@@ -52,6 +52,19 @@ class Config:
     daily_loss_limit_usd: float = 50.0
     max_consecutive_losses: int = 5
 
+    # exits / trade management (early exits sell the position back into the book)
+    enable_early_exits: bool = True
+    take_profit_price: float = 0.92      # exit when the held token's price >= this
+    take_profit_pct: float = 0.0         # OR exit when gain vs entry >= this (0 disables)
+    stop_loss_pct: float = 0.35          # exit when loss vs entry >= this fraction (0 disables)
+    stop_loss_price: float = 0.0         # OR exit when price <= this absolute (0 disables)
+    trailing_stop_pct: float = 0.15      # exit when price drops this far from peak (0 disables)
+    time_exit_seconds: float = 30.0      # exit when this many seconds remain (0 disables)
+    confidence_exit: bool = True         # exit if trend/indicators flip against the position
+    exit_confidence_min: int = 2         # min opposing confidence to trigger a confidence exit
+    volatility_exit: bool = True         # exit if volatility spikes against a losing position
+    volatility_exit_mult: float = 3.0    # vol >= entry_vol * this triggers the volatility exit
+
     # loop
     poll_interval_seconds: float = 3.0
     market_refresh_seconds: float = 30.0
