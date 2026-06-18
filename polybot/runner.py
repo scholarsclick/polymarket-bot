@@ -486,6 +486,7 @@ class BotRunner:
         cf_watch: list = []                   # early-exited trades awaiting resolution
         cf_stats = {"count": 0, "early_total": 0.0, "hold_total": 0.0}  # hold-vs-early
         entry_times: deque = deque(maxlen=5000)   # for trades/hour pacing
+        day_key = time.strftime("%Y-%m-%d", time.gmtime())   # UTC day for daily-loss reset
         markets_cache: List = []
         discovery_report: dict = {}
         last_discover = 0.0
@@ -562,8 +563,15 @@ class BotRunner:
                     self._force_discover.clear()
                 poly_health["discovery"] = discovery_report
 
-                risk.consecutive_losses = 0  # independent windows for the demo
-                risk.realized_pnl_today = 0.0
+                # Consecutive-loss halt stays disabled (max-trades goal), but the
+                # DAILY loss limit is enforced. realized_pnl_today accumulates via
+                # register_settlement and resets at UTC midnight.
+                risk.consecutive_losses = 0
+                day = time.strftime("%Y-%m-%d", time.gmtime(now))
+                if day != day_key:
+                    day_key = day
+                    risk.realized_pnl_today = 0.0
+                halt_reason = risk.halted()   # None, or "daily loss limit reached…"
 
                 # 3) evaluate each market
                 scanned = []
@@ -770,7 +778,12 @@ class BotRunner:
                     "trades_per_hour": round(rate_per_hr, 1),
                     "projected_per_day": int(rate_per_hr * 24),
                     "symbols": symbols,
+                    "daily_pnl": risk.realized_pnl_today,
+                    "daily_limit": risk.daily_loss_limit(),
+                    "halted": halt_reason,
                 }
+                if halt_reason:
+                    self._set_warning("🛑 " + halt_reason)
                 self._commit_live(risk, feed, prices, analyses, open_trades, closed_trades,
                                   opp_log, tf, data_available=True, debug=debug,
                                   poly_health=poly_health, warning=None, scanned=scanned,

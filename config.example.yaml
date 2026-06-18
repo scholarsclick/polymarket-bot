@@ -52,8 +52,9 @@ max_position_usd: 25.0             # max notional per market
 max_total_exposure_usd: 100.0      # max notional across all open positions
 max_open_positions: 12             # raise for more concurrent trades
 max_trades_per_market: 1           # one entry per market window
-daily_loss_limit_usd: 50.0         # halt new entries after this realized loss in a day
-max_consecutive_losses: 5          # halt new entries after this many losers in a row
+daily_loss_limit_usd: 50.0         # absolute daily loss halt (used only if pct <= 0)
+daily_loss_limit_pct: 0.5          # STOP for the day after losing this fraction of capital (0.5 = 50%)
+max_consecutive_losses: 5          # (disabled in live for max-trades; daily pct is the real guard)
 
 # --- Exits / trade management ----------------------------------------------
 # Early exits SELL the position back into the book. (Take-profit and stop-loss

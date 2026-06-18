@@ -84,6 +84,10 @@ with st.sidebar:
     max_exp = st.number_input("Max total exposure ($)", min_value=1.0,
                               value=float(cfg.max_total_exposure_usd), step=25.0)
     kelly = st.slider("Kelly fraction", 0.05, 1.0, float(cfg.kelly_fraction), 0.05)
+    daily_stop_pct = st.slider("Daily stop-loss (% of capital)", 0, 100,
+                               int(cfg.daily_loss_limit_pct * 100), 5,
+                               help="Halt trading for the rest of the day after losing this "
+                                    "fraction of capital. 0 = no daily stop.")
 
     st.divider()
     c1, c2 = st.columns(2)
@@ -106,6 +110,7 @@ if start:
         cfg.max_open_positions = int(max_open)
         cfg.max_total_exposure_usd = max_exp
         cfg.kelly_fraction = kelly
+        cfg.daily_loss_limit_pct = daily_stop_pct / 100.0
         cfg.symbols = symbols or cfg.symbols
         runner = BotRunner(
             cfg,
@@ -336,6 +341,14 @@ def render_dashboard():
                      "No simulated prices are shown (simulator FALSE).")
         d = s.entry_diagnostics
         if d:
+            dp, dl = d.get("daily_pnl", 0.0), d.get("daily_limit", 0.0)
+            if d.get("halted"):
+                st.error(f"🛑 STOPPED FOR THE DAY — daily loss limit reached "
+                         f"(day PnL ${dp:+.2f}, limit -${dl:.2f}). "
+                         f"New entries are paused; resumes at UTC midnight.", icon="🛑")
+            elif dl > 0:
+                st.caption(f"Daily stop-loss: day PnL **${dp:+.2f}** of allowed **-${dl:.2f}** "
+                           f"({(-dp / dl * 100) if dl else 0:.0f}% used)")
             open_n, max_open = d.get("open", 0), d.get("max_open", 0)
             exp, max_exp = d.get("exposure", 0), d.get("max_exposure", 0)
             skipped = d.get("skipped", {})

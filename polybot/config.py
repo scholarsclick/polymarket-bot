@@ -50,7 +50,8 @@ class Config:
     max_total_exposure_usd: float = 100.0
     max_open_positions: int = 12
     max_trades_per_market: int = 1
-    daily_loss_limit_usd: float = 50.0
+    daily_loss_limit_usd: float = 50.0   # absolute daily loss halt (used if pct <= 0)
+    daily_loss_limit_pct: float = 0.5    # halt for the day after losing this fraction of capital
     max_consecutive_losses: int = 5
 
     # exits / trade management (early exits sell the position back into the book)

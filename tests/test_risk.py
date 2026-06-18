@@ -77,7 +77,7 @@ def test_consecutive_losses_halt():
 
 
 def test_daily_loss_limit_halt():
-    cfg = _cfg(daily_loss_limit_usd=10)
+    cfg = _cfg(daily_loss_limit_usd=10, daily_loss_limit_pct=0.0)  # use the USD limit
     rm = RiskManager(cfg)
     p = Position(market=_market(), side=Side.UP, token_id="UP", size=20, entry_price=0.5, entry_time=0)
     p.pnl = -11
@@ -93,3 +93,22 @@ def test_max_trades_per_market():
     pos = Position(market=m, side=Side.UP, token_id="UP", size=10, entry_price=0.5, entry_time=0)
     rm.register_entry(pos)
     assert rm.can_enter(_signal(market=m)) == "already traded this market"
+
+
+def test_daily_loss_limit_pct_halts_at_50pct():
+    cfg = _cfg(bankroll_usd=200.0, daily_loss_limit_pct=0.5)
+    rm = RiskManager(cfg)
+    assert rm.daily_loss_limit() == 100.0          # 50% of 200
+    rm.realized_pnl_today = -99.0
+    assert rm.halted() is None                      # not yet
+    rm.realized_pnl_today = -100.0
+    assert rm.halted() is not None                  # hit -50% -> stop
+    assert "stopped for the day" in rm.halted()
+
+
+def test_daily_loss_limit_pct_disabled_falls_back_to_usd():
+    cfg = _cfg(bankroll_usd=200.0, daily_loss_limit_pct=0.0, daily_loss_limit_usd=30.0)
+    rm = RiskManager(cfg)
+    assert rm.daily_loss_limit() == 30.0
+    rm.realized_pnl_today = -31.0
+    assert rm.halted() is not None

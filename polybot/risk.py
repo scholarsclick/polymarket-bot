@@ -22,10 +22,20 @@ class RiskManager:
         self.consecutive_losses: int = 0
 
     # ----- gating ----------------------------------------------------------
+    def daily_loss_limit(self) -> float:
+        """Absolute daily loss limit in USD: a percent of capital if set,
+        otherwise the fixed dollar limit."""
+        pct = getattr(self.cfg, "daily_loss_limit_pct", 0.0)
+        if pct and pct > 0:
+            return pct * self.cfg.bankroll_usd
+        return abs(self.cfg.daily_loss_limit_usd)
+
     def halted(self) -> Optional[str]:
         """Return a reason string if new entries are halted, else None."""
-        if self.realized_pnl_today <= -abs(self.cfg.daily_loss_limit_usd):
-            return f"daily loss limit hit ({self.realized_pnl_today:.2f})"
+        limit = self.daily_loss_limit()
+        if limit > 0 and self.realized_pnl_today <= -limit:
+            return (f"daily loss limit reached: {self.realized_pnl_today:+.2f} "
+                    f"≤ -{limit:.2f} — stopped for the day")
         if self.consecutive_losses >= self.cfg.max_consecutive_losses:
             return f"{self.consecutive_losses} consecutive losses"
         return None

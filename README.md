@@ -236,9 +236,17 @@ market would have settled at).
 > `size × (exit_price − entry_price)`. In live-real-orders mode this is a real
 > FAK sell order; in paper mode it's simulated at the same price.
 
+**Daily stop-loss.** Set **Daily stop-loss (% of capital)** in the sidebar
+(`daily_loss_limit_pct`, default **50%**). Once the day's realized loss reaches
+that fraction of `bankroll_usd`, the bot **stops taking new trades for the rest
+of the day** (open positions still resolve) and shows a 🛑 banner; it resets and
+resumes at UTC midnight. Set it to 0 to disable. The diagnostics line shows how
+much of the daily allowance is used.
+
 **Safety (enforced):**
 
 - Default mode is Live Data Paper Trading; **no private key required**.
+- **Daily stop-loss** halts new entries after a −50%-of-capital day (configurable).
 - Real orders require Live Real Orders mode **and** the confirmation checkbox
   **and** a funded `POLYMARKET_PRIVATE_KEY` — three explicit steps.
 - If live data is unavailable, the bot **pauses and shows a warning**; it never
