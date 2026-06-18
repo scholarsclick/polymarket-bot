@@ -50,7 +50,7 @@ bankroll_usd: 200.0                # assumed working capital for sizing
 kelly_fraction: 0.25               # fraction of full Kelly to bet (0.25 = quarter Kelly)
 max_position_usd: 25.0             # max notional per market
 max_total_exposure_usd: 100.0      # max notional across all open positions
-max_open_positions: 6
+max_open_positions: 12             # raise for more concurrent trades
 max_trades_per_market: 1           # one entry per market window
 daily_loss_limit_usd: 50.0         # halt new entries after this realized loss in a day
 max_consecutive_losses: 5          # halt new entries after this many losers in a row
@@ -81,7 +81,9 @@ rsi_oversold: 20.0
 # then gates/sizes entries by the learned probability. Cold-starts on rules only.
 learning_enabled: true
 learning_min_samples: 25          # trades needed before the model influences anything
-learning_min_prob: 0.45           # skip entries the model rates below this P(correct)
+learning_gate: false              # false = model only SIZES trades; true = it can BLOCK weak ones
+learning_min_prob: 0.45           # gate threshold (only used when learning_gate is true)
+learning_explore_rate: 0.2        # when gating, still take this fraction to keep learning
 learning_lr: 0.05
 learning_size_weight: true        # scale position size by the model's P(correct)
 

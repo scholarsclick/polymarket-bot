@@ -202,8 +202,10 @@ edge, time-left, oriented toward the bet) plus the label *was the prediction
 correct* — to an online logistic-regression model (pure Python, no extra deps).
 
 - It estimates **P(correct)** for each new setup, shown in the scanner's `model`
-  column and used to **gate** entries (`learning_min_prob`) and **scale size**
-  (`learning_size_weight`).
+  column. By default it only **scales size** (`learning_size_weight`); it does
+  **not** block trades. Set `learning_gate: true` to also skip low-probability
+  setups — even then it keeps an exploration rate (`learning_explore_rate`) so it
+  can never freeze itself by gating out all its own training data.
 - It **cold-starts on rules only** for the first `learning_min_samples` trades,
   then activates.
 - Weights + raw training rows persist to `state/model.json` and

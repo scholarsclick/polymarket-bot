@@ -48,7 +48,7 @@ class Config:
     kelly_fraction: float = 0.25
     max_position_usd: float = 25.0
     max_total_exposure_usd: float = 100.0
-    max_open_positions: int = 6
+    max_open_positions: int = 12
     max_trades_per_market: int = 1
     daily_loss_limit_usd: float = 50.0
     max_consecutive_losses: int = 5
@@ -75,7 +75,9 @@ class Config:
     # self-learning model (learns which signals predict correct trades)
     learning_enabled: bool = True
     learning_min_samples: int = 25       # trades needed before the model influences anything
-    learning_min_prob: float = 0.45      # gate: skip entries the model rates below this
+    learning_gate: bool = False          # if True, BLOCK low-prob entries (off = size-only)
+    learning_min_prob: float = 0.45      # gate threshold (only used when learning_gate is True)
+    learning_explore_rate: float = 0.2   # when gating, still take this fraction to keep learning
     learning_lr: float = 0.05            # SGD learning rate
     learning_size_weight: bool = True    # scale size by the model's P(correct)
 

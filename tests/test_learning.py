@@ -76,3 +76,14 @@ def test_learner_separates_good_from_bad_setups(tmp_path):
         lr.record_outcome(bad, correct=False)
     assert lr.prob(good) > lr.prob(bad)
     assert lr.prob(good) > 0.6
+
+
+def test_model_gate_off_by_default():
+    # The model must NOT hard-block entries by default (size-only), so it can't
+    # freeze itself and stop taking trades.
+    from polybot.config import Config
+    c = Config()
+    assert c.learning_gate is False
+    assert c.learning_size_weight is True
+    assert c.learning_explore_rate > 0     # exploration when gating is on
+    assert c.max_open_positions >= 12      # more concurrent trades

@@ -171,6 +171,7 @@ class BotState:
     exit_perf: List[dict] = field(default_factory=list)          # performance by exit type
     hold_vs_early: dict = field(default_factory=dict)            # early-exit vs hold-to-resolution
     model_stats: dict = field(default_factory=dict)             # self-learning model status
+    entry_diagnostics: dict = field(default_factory=dict)      # why entries are / aren't happening
     debug: dict = field(default_factory=dict)                    # raw source statuses for the debug panel
 
     @property
@@ -306,6 +307,7 @@ class BotRunner:
             copy.exit_perf = list(s.exit_perf)
             copy.hold_vs_early = dict(s.hold_vs_early)
             copy.model_stats = dict(s.model_stats)
+            copy.entry_diagnostics = dict(s.entry_diagnostics)
             copy.spot_health = dict(s.spot_health)
             copy.candle_health = dict(s.candle_health)
             copy.polymarket_health = dict(s.polymarket_health)
@@ -562,6 +564,8 @@ class BotRunner:
 
                 # 3) evaluate each market
                 scanned = []
+                skip_tally: dict = {}
+                enter_signals = 0
                 for m in markets_cache:
                     if m.symbol not in analyses or m.end_time <= now:
                         continue
@@ -657,12 +661,26 @@ class BotRunner:
                     # --- entry (one per market window) ---
                     in_window = sec_left >= cfg.min_seconds_to_resolution
                     block = _entry_quality_block(spread, liquidity, cfg)
-                    if (not block and model_prob is not None
-                            and model_prob < cfg.learning_min_prob):
-                        block = f"model P(correct) {model_prob:.0%}<{cfg.learning_min_prob:.0%}"
-                    if block and opp.action == "enter":
-                        opp_row["action"] = "no_trade"
-                        opp_row["reason"] = f"skip: {block} | " + opp_row["reason"]
+                    # Model only BLOCKS when learning_gate is on — and even then it
+                    # explores (takes a fraction anyway) so it never freezes itself.
+                    if (not block and cfg.learning_gate and model_prob is not None
+                            and model_prob < cfg.learning_min_prob
+                            and random.random() > cfg.learning_explore_rate):
+                        block = f"model P {model_prob:.0%}<{cfg.learning_min_prob:.0%}"
+                    if opp.action == "enter":
+                        enter_signals += 1
+                        if block:
+                            skip_tally[block.split(":")[0].split(" ")[0]] = \
+                                skip_tally.get(block.split(":")[0].split(" ")[0], 0) + 1
+                            opp_row["action"] = "no_trade"
+                            opp_row["reason"] = f"skip: {block} | " + opp_row["reason"]
+                        elif m.condition_id in traded_markets:
+                            skip_tally["already_traded"] = skip_tally.get("already_traded", 0) + 1
+                        elif not in_window:
+                            skip_tally["out_of_window"] = skip_tally.get("out_of_window", 0) + 1
+                        elif risk.can_enter_basic() is not None:
+                            r = risk.can_enter_basic()
+                            skip_tally[r.split(" ")[0]] = skip_tally.get(r.split(" ")[0], 0) + 1
                     if (opp.action == "enter" and not block
                             and m.condition_id not in open_trades
                             and m.condition_id not in traded_markets and in_window
@@ -733,10 +751,18 @@ class BotRunner:
                     cf_stats["hold_total"] += hold_pnl
                 cf_watch[:] = still_watch
 
+                diag = {
+                    "scanned": len(scanned), "enter_signals": enter_signals,
+                    "open": len([1 for _ in open_trades]),
+                    "max_open": cfg.max_open_positions,
+                    "exposure": risk.current_exposure(), "max_exposure": cfg.max_total_exposure_usd,
+                    "skipped": skip_tally,
+                }
                 self._commit_live(risk, feed, prices, analyses, open_trades, closed_trades,
                                   opp_log, tf, data_available=True, debug=debug,
                                   poly_health=poly_health, warning=None, scanned=scanned,
-                                  cf_stats=cf_stats, model_stats=learner.stats())
+                                  cf_stats=cf_stats, model_stats=learner.stats(),
+                                  entry_diag=diag)
         except Exception as exc:  # noqa: BLE001
             with self._lock:
                 self.state.error = f"live loop error: {exc}"
@@ -771,7 +797,8 @@ class BotRunner:
 
     def _commit_live(self, risk, feed, prices, analyses, open_trades, closed_trades,
                      opp_log, timeframe, data_available, warning, scanned=None,
-                     debug=None, poly_health=None, cf_stats=None, model_stats=None) -> None:
+                     debug=None, poly_health=None, cf_stats=None, model_stats=None,
+                     entry_diag=None) -> None:
         from .exits import exit_performance
         closed = list(closed_trades)
         wins = sum(1 for t in closed if t["result"] == "win")
@@ -804,6 +831,8 @@ class BotRunner:
             s.exit_perf = exit_performance(closed)
             if model_stats is not None:
                 s.model_stats = model_stats
+            if entry_diag is not None:
+                s.entry_diagnostics = entry_diag
             if cf_stats and cf_stats["count"]:
                 s.hold_vs_early = {
                     "count": cf_stats["count"],

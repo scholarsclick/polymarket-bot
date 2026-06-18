@@ -309,6 +309,20 @@ def render_dashboard():
         if not s.data_available:
             st.error("Live data unavailable — trading is paused. "
                      "No simulated prices are shown (simulator FALSE).")
+        d = s.entry_diagnostics
+        if d:
+            open_n, max_open = d.get("open", 0), d.get("max_open", 0)
+            exp, max_exp = d.get("exposure", 0), d.get("max_exposure", 0)
+            skipped = d.get("skipped", {})
+            msg = (f"Scanned **{d.get('scanned', 0)}** · entry signals **{d.get('enter_signals', 0)}** · "
+                   f"open **{open_n}/{max_open}** · exposure **${exp:.0f}/${max_exp:.0f}**")
+            if skipped:
+                msg += " · skipped: " + ", ".join(f"{k}×{v}" for k, v in skipped.items())
+            st.info(msg, icon="🔎")
+            if open_n >= max_open:
+                st.caption("⚠️ At max open positions — raise `max_open_positions` for more concurrent trades.")
+            if max_exp and exp >= max_exp * 0.99:
+                st.caption("⚠️ At max exposure — raise `max_total_exposure_usd` / `bankroll_usd`.")
     else:
         st.caption("🧪 SIMULATOR TEST MODE — prices below are **synthetic** (not live).")
 
