@@ -54,7 +54,9 @@ polybot/
   risk.py              Kelly sizing + risk limits
   clob.py              py-clob-client wrapper (auth, books, orders)
   executor.py          PaperExecutor + LiveExecutor
-  engine.py            main loop
+  engine.py            main loop (with an optional observer hook for the UI)
+  runner.py            thread-safe BotRunner + state that powers the web UI
+app.py                 Streamlit browser dashboard (streamlit run app.py)
 tests/                 unit tests for strategy, risk, market parsing
 ```
 
@@ -77,6 +79,46 @@ set `signature_type` + `funder` in `config.yaml`:
 
 Then make sure that account holds USDC.e on Polygon and has approved the CLOB
 exchange (Polymarket's UI does this the first time you trade).
+
+## Browser dashboard (Streamlit)
+
+A point-and-click dashboard with a live equity curve, balance, entries, win
+rate, recent trades, and the markets currently being scanned.
+
+```bash
+pip install -r requirements.txt     # includes streamlit + pandas
+streamlit run app.py                 # opens http://localhost:8501
+```
+
+In the sidebar:
+
+- **Mode** — *Paper (simulated)* runs an offline simulator and needs **no
+  private key**; *Live (real markets)* connects to Polymarket.
+  - In live mode, leave **"Execute REAL orders"** unchecked to read real
+    markets and books while simulating fills (needs only network access).
+    Check it to place real orders — this requires a funded
+    `POLYMARKET_PRIVATE_KEY` in `.env`.
+- **Parameters** — bankroll, min-edge, max position, and Kelly fraction.
+- **Start / Stop** — the bot runs in a background thread; the page
+  auto-refreshes about once per second.
+
+The dashboard shows:
+
+| Panel | What it is |
+|---|---|
+| Balance | current equity (bankroll + realized PnL) |
+| Total entries | number of positions taken |
+| Win rate | settled wins / settled trades |
+| Equity curve | equity over time |
+| Scanned markets | every in-window market with spot, model fair, asks, decision |
+| Recent trades | latest entries/settlements with status and PnL |
+
+> Paper/simulated PnL is illustrative (the model matches the synthetic
+> generator by construction) — not a forward-return estimate. See the risk
+> warning at the top.
+
+Run it headless / on a server with
+`streamlit run app.py --server.headless true --server.port 8501`.
 
 ## Usage
 

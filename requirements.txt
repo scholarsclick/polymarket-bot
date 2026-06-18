@@ -6,5 +6,9 @@ requests>=2.31.0
 PyYAML>=6.0
 python-dotenv>=1.0.0
 
+# Browser dashboard (streamlit run app.py); pulls in pandas
+streamlit>=1.33.0
+pandas>=2.0.0
+
 # Dev / test
 pytest>=8.0.0

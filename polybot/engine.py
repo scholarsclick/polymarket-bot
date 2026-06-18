@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import signal as signal_module
 import time
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from .clob import ClobGateway
 from .config import Config
@@ -14,14 +14,18 @@ from .gamma import GammaClient
 from .models import CryptoMarket, Position, Quote
 from .pricefeed import PriceFeed
 from .risk import RiskManager
-from .strategy import build_strategy
+from .strategy import build_strategy, fair_up_probability
 
 log = logging.getLogger("polybot.engine")
 
 
 class Engine:
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, observer: Optional[Callable[[dict], None]] = None):
         self.cfg = cfg
+        # Optional callback invoked once per tick with a state snapshot dict.
+        # Used by the Streamlit dashboard; never affects trading behaviour.
+        self.observer = observer
+        self.scanned: Dict[str, dict] = {}
         self.gamma = GammaClient(cfg.gamma_host)
         self.feed = PriceFeed(
             sources=cfg.price_sources,
@@ -50,8 +54,13 @@ class Engine:
                  mode, self.strategy.name, self.cfg.symbols, self.cfg.durations_minutes)
         self.gateway.connect(require_auth=not self.cfg.dry_run)
 
-        signal_module.signal(signal_module.SIGINT, self._stop)
-        signal_module.signal(signal_module.SIGTERM, self._stop)
+        # Signal handlers only work in the main thread; skip when embedded
+        # (e.g. run from the Streamlit dashboard in a worker thread).
+        try:
+            signal_module.signal(signal_module.SIGINT, self._stop)
+            signal_module.signal(signal_module.SIGTERM, self._stop)
+        except (ValueError, RuntimeError):
+            pass
 
         while self._running:
             try:
@@ -66,6 +75,10 @@ class Engine:
         log.info("Shutdown requested — finishing up...")
         self._running = False
 
+    def stop(self) -> None:
+        """Public stop, usable from another thread."""
+        self._running = False
+
     # ----- one iteration ---------------------------------------------------
     def _tick(self) -> None:
         now = time.time()
@@ -75,13 +88,15 @@ class Engine:
 
         self._settle_expired(now)
 
+        self.scanned = {}
         halt = self.risk.halted()
-        if halt:
+        if not halt:
+            for market in list(self.markets.values()):
+                self._evaluate_market(market, now)
+        else:
             log.warning("Entries halted: %s", halt)
-            return
 
-        for market in list(self.markets.values()):
-            self._evaluate_market(market, now)
+        self._publish(now, halt)
 
     def _refresh_markets(self, now: float) -> None:
         found = self.gamma.discover(
@@ -128,21 +143,40 @@ class Engine:
             log.debug("book fetch failed for %s: %s", market.slug, exc)
             return
 
+        # Record a scanner view for the dashboard (every in-window market).
+        fair_up = fair_up_probability(spot, candle_open, max(0.0, ttl), vol)
+        self.scanned[market.condition_id] = {
+            "symbol": market.symbol,
+            "duration_min": market.duration_minutes,
+            "seconds_left": ttl,
+            "spot": spot,
+            "open": candle_open,
+            "fair_up": fair_up,
+            "up_ask": up_q.best_ask,
+            "down_ask": down_q.best_ask,
+            "decision": "watching",
+        }
+
         sig = self.strategy.evaluate(market, candle_open, spot, vol, up_q, down_q, now)
         if sig is None:
             return
 
         reject = self.risk.can_enter(sig)
         if reject:
+            self.scanned[market.condition_id]["decision"] = f"skip: {reject}"
             log.debug("skip %s: %s", market.slug, reject)
             return
 
         avail = up_q.ask_size if sig.side.value == "UP" else down_q.ask_size
         sig = self.risk.size_signal(sig, available_size=avail)
         if sig.size <= 0:
+            self.scanned[market.condition_id]["decision"] = "skip: size 0"
             log.debug("skip %s: size rounds to 0", market.slug)
             return
 
+        self.scanned[market.condition_id]["decision"] = (
+            f"BUY {sig.side.value} {sig.size:.0f}@{sig.price:.3f} edge={sig.edge:+.3f}"
+        )
         pos = self.executor.place(sig)
         if pos:
             self.risk.register_entry(pos)
@@ -163,6 +197,46 @@ class Engine:
             resolved_up = close_px > open_px
             self.executor.settle(pos, resolved_up)
             self.risk.register_settlement(pos)
+
+    # ----- observability ---------------------------------------------------
+    def _publish(self, now: float, halt: Optional[str] = None) -> None:
+        if self.observer is None:
+            return
+        positions = self.risk.open_positions
+        closed = [p for p in positions if not p.open]
+        wins = sum(1 for p in closed if p.pnl > 0)
+        losses = sum(1 for p in closed if p.pnl < 0)
+        realized = sum(p.pnl for p in closed)
+        recent = []
+        for p in positions[-25:][::-1]:
+            recent.append({
+                "time": p.entry_time,
+                "symbol": p.market.symbol,
+                "duration_min": p.market.duration_minutes,
+                "side": p.side.value,
+                "size": p.size,
+                "price": p.entry_price,
+                "status": ("open" if p.open else ("win" if p.pnl > 0 else "loss")),
+                "pnl": p.pnl,
+            })
+        snapshot = {
+            "ts": now,
+            "mode": "paper" if self.cfg.dry_run else "live",
+            "halted": halt,
+            "bankroll": self.cfg.bankroll_usd,
+            "equity": self.cfg.bankroll_usd + realized,
+            "realized": realized,
+            "entries": len(positions),
+            "wins": wins,
+            "losses": losses,
+            "exposure": self.risk.current_exposure(),
+            "recent_trades": recent,
+            "scanned": list(self.scanned.values()),
+        }
+        try:
+            self.observer(snapshot)
+        except Exception as exc:  # noqa: BLE001 — UI must never break the loop
+            log.debug("observer error: %s", exc)
 
     # ----- reporting -------------------------------------------------------
     def _print_summary(self) -> None:
