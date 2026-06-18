@@ -194,6 +194,28 @@ bot is *right*, not just green.
   overbought reading (`rsi_overbought`) or DOWN into oversold (`rsi_oversold`),
   avoiding exhaustion entries that mean-revert.
 
+### Self-learning model
+
+The bot learns from its own history. Every closed trade contributes one training
+example — the entry's signals (trend, RSI, MACD, EMA, volume, body, pattern,
+edge, time-left, oriented toward the bet) plus the label *was the prediction
+correct* — to an online logistic-regression model (pure Python, no extra deps).
+
+- It estimates **P(correct)** for each new setup, shown in the scanner's `model`
+  column and used to **gate** entries (`learning_min_prob`) and **scale size**
+  (`learning_size_weight`).
+- It **cold-starts on rules only** for the first `learning_min_samples` trades,
+  then activates.
+- Weights + raw training rows persist to `state/model.json` and
+  `state/trade_log.jsonl`, so learning survives restarts and keeps improving.
+- The dashboard's **🧠 Self-learning model** panel shows training samples, the
+  model's recent accuracy, and the **learned signal weights** (which indicators
+  have actually predicted correct trades).
+
+Tune in `config.yaml`: `learning_enabled`, `learning_min_samples`,
+`learning_min_prob`, `learning_lr`, `learning_size_weight`. Delete the two
+`state/` files to reset learning.
+
 The dashboard shows, per open trade, the **mark price, unrealized PnL, and live
 TP / SL / trailing levels**; closed trades show the **exit type and exit
 reason**; and an **Exit performance** panel ranks exit methods by average PnL and

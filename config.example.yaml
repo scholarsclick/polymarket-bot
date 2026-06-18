@@ -76,6 +76,15 @@ avoid_rsi_extremes: true          # don't buy into overbought / oversold exhaust
 rsi_overbought: 80.0
 rsi_oversold: 20.0
 
+# --- Self-learning model ---------------------------------------------------
+# Learns from every closed trade which signals actually predict correct trades,
+# then gates/sizes entries by the learned probability. Cold-starts on rules only.
+learning_enabled: true
+learning_min_samples: 25          # trades needed before the model influences anything
+learning_min_prob: 0.45           # skip entries the model rates below this P(correct)
+learning_lr: 0.05
+learning_size_weight: true        # scale position size by the model's P(correct)
+
 # --- Loop ------------------------------------------------------------------
 poll_interval_seconds: 3           # how often to re-evaluate active markets
 market_refresh_seconds: 30         # how often to re-discover markets from Gamma

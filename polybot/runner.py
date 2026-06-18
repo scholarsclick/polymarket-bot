@@ -170,6 +170,7 @@ class BotState:
     unrealized: float = 0.0                                       # sum of open-trade uPnL
     exit_perf: List[dict] = field(default_factory=list)          # performance by exit type
     hold_vs_early: dict = field(default_factory=dict)            # early-exit vs hold-to-resolution
+    model_stats: dict = field(default_factory=dict)             # self-learning model status
     debug: dict = field(default_factory=dict)                    # raw source statuses for the debug panel
 
     @property
@@ -304,6 +305,7 @@ class BotRunner:
             copy.opportunities = list(s.opportunities)
             copy.exit_perf = list(s.exit_perf)
             copy.hold_vs_early = dict(s.hold_vs_early)
+            copy.model_stats = dict(s.model_stats)
             copy.spot_health = dict(s.spot_health)
             copy.candle_health = dict(s.candle_health)
             copy.polymarket_health = dict(s.polymarket_health)
@@ -439,6 +441,7 @@ class BotRunner:
         from .executor import LiveExecutor, PaperExecutor
         from .exits import evaluate_exit, exit_levels
         from .gamma import GammaClient
+        from .learning import TradeLearner, featurize
         from .marketdata import MarketDataFeed
 
         cfg = self.cfg
@@ -469,6 +472,8 @@ class BotRunner:
         strategy = build_strategy(cfg.strategy, cfg)
         risk = RiskManager(cfg)
         executor = LiveExecutor(gateway) if self.execute_orders else PaperExecutor(cfg.state_dir)
+        learner = TradeLearner(cfg.state_dir, lr=cfg.learning_lr,
+                               min_samples=cfg.learning_min_samples)
 
         open_trades: Dict[str, dict] = {}     # condition_id -> trade dict
         closed_trades: deque = deque(maxlen=200)
@@ -590,6 +595,14 @@ class BotRunner:
                         cfg.min_edge, min_confidence=self.min_confidence,
                         avoid_rsi_extremes=cfg.avoid_rsi_extremes,
                         rsi_overbought=cfg.rsi_overbought, rsi_oversold=cfg.rsi_oversold)
+                    # self-learning: features + model probability for this setup
+                    features = model_prob = None
+                    if opp.side is not None:
+                        features = featurize(a, opp.side.value, opp.edge, sec_left,
+                                             m.duration_minutes)
+                        if cfg.learning_enabled:
+                            model_prob = learner.prob(features)
+
                     opp_row = {
                         "time": now, "symbol": m.symbol, "market": m.question[:48],
                         "duration_min": m.duration_minutes, "seconds_left": sec_left,
@@ -597,7 +610,7 @@ class BotRunner:
                         "spread": spread, "liquidity": liquidity,
                         "action": opp.action, "side": opp.side.value if opp.side else "—",
                         "confidence": opp.confidence, "edge": opp.edge, "fair": opp.fair,
-                        "reason": opp.reason,
+                        "model": model_prob, "reason": opp.reason,
                     }
                     scanned.append(opp_row)
 
@@ -631,6 +644,8 @@ class BotRunner:
                                 risk.register_settlement(t["position"])
                                 rec = make_early_closed_trade(t, mark, spot, now,
                                                               decision.type, decision.reason)
+                                if t.get("features") is not None:
+                                    learner.record_outcome(t["features"], rec["correct"])
                                 closed_trades.appendleft(rec)
                                 cf_watch.append({"end_time": t["end_time"],
                                                  "candle_open": t["candle_open"], "side": t["side"],
@@ -642,6 +657,9 @@ class BotRunner:
                     # --- entry (one per market window) ---
                     in_window = sec_left >= cfg.min_seconds_to_resolution
                     block = _entry_quality_block(spread, liquidity, cfg)
+                    if (not block and model_prob is not None
+                            and model_prob < cfg.learning_min_prob):
+                        block = f"model P(correct) {model_prob:.0%}<{cfg.learning_min_prob:.0%}"
                     if block and opp.action == "enter":
                         opp_row["action"] = "no_trade"
                         opp_row["reason"] = f"skip: {block} | " + opp_row["reason"]
@@ -655,6 +673,8 @@ class BotRunner:
                                      reason=opp.reason)
                         avail = up_q.ask_size if opp.side is Side.UP else dn_q.ask_size
                         scale = _confidence_scale(opp.confidence, cfg)
+                        if model_prob is not None and cfg.learning_size_weight:
+                            scale *= max(0.5, min(1.5, model_prob / 0.5))  # 0.5→0.5x, 0.75→1.5x
                         sig = risk.size_signal(sig, available_size=avail, confidence_scale=scale)
                         if sig.size > 0:
                             pos = executor.place(sig)
@@ -671,6 +691,7 @@ class BotRunner:
                                     "entry_vol": vol_ps, "trail": None,
                                     "candle_open": candle_open, "end_time": m.end_time,
                                     "reason_entry": opp.reason, "position": pos,
+                                    "features": features,
                                 }
                                 opp_log.appendleft({**opp_row, "action": "ENTER"})
 
@@ -688,6 +709,8 @@ class BotRunner:
                         t["position"].open = False
                         t["position"].pnl = rec["pnl"]
                     risk.register_settlement(t["position"])
+                    if t.get("features") is not None:
+                        learner.record_outcome(t["features"], rec["correct"])
                     closed_trades.appendleft({k: v for k, v in rec.items()
                                               if k not in ("resolved_up", "won")})
 
@@ -713,7 +736,7 @@ class BotRunner:
                 self._commit_live(risk, feed, prices, analyses, open_trades, closed_trades,
                                   opp_log, tf, data_available=True, debug=debug,
                                   poly_health=poly_health, warning=None, scanned=scanned,
-                                  cf_stats=cf_stats)
+                                  cf_stats=cf_stats, model_stats=learner.stats())
         except Exception as exc:  # noqa: BLE001
             with self._lock:
                 self.state.error = f"live loop error: {exc}"
@@ -748,7 +771,7 @@ class BotRunner:
 
     def _commit_live(self, risk, feed, prices, analyses, open_trades, closed_trades,
                      opp_log, timeframe, data_available, warning, scanned=None,
-                     debug=None, poly_health=None, cf_stats=None) -> None:
+                     debug=None, poly_health=None, cf_stats=None, model_stats=None) -> None:
         from .exits import exit_performance
         closed = list(closed_trades)
         wins = sum(1 for t in closed if t["result"] == "win")
@@ -779,6 +802,8 @@ class BotRunner:
             s.wins, s.losses, s.realized = wins, losses, realized
             s.unrealized = unrealized
             s.exit_perf = exit_performance(closed)
+            if model_stats is not None:
+                s.model_stats = model_stats
             if cf_stats and cf_stats["count"]:
                 s.hold_vs_early = {
                     "count": cf_stats["count"],

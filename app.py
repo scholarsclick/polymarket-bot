@@ -140,12 +140,13 @@ def _markets_rows(scanned):
 
 
 def _opp_rows(scanned):
-    cols = ["market", "t_left", "action", "conf", "side", "edge", "reason"]
+    cols = ["market", "t_left", "action", "conf", "model", "side", "edge", "reason"]
     if not scanned:
         return pd.DataFrame(columns=cols)
     df = pd.DataFrame(scanned)
     df["t_left"] = df["seconds_left"].map(lambda s: f"{s:.0f}s")
     df["conf"] = df.get("confidence", 0)
+    df["model"] = df["model"].map(lambda p: f"{p:.0%}" if p is not None else "—") if "model" in df else "—"
     df["edge"] = df["edge"].map(lambda e: f"{e:+.3f}")
     df["action"] = df["action"].map({"enter": "🟢 TRADE", "possible": "🟡 possible",
                                      "no_trade": "⚪ NO TRADE", "ENTER": "🟢 ENTER"}).fillna(df["action"])
@@ -377,6 +378,27 @@ def render_dashboard():
             else:
                 st.caption("Hold-vs-early comparison appears once early-exited "
                            "markets reach their resolution.")
+
+        st.subheader("🧠 Self-learning model")
+        ms = s.model_stats
+        if ms:
+            g1, g2, g3 = st.columns([1, 1, 2])
+            ready = ms.get("ready")
+            g1.metric("Training samples", ms.get("samples", 0),
+                      "active" if ready else f"need {ms.get('min_samples', 0)}")
+            acc = ms.get("recent_accuracy")
+            g2.metric("Model accuracy", f"{acc:.0%}" if acc is not None else "—",
+                      "P(correct) calls")
+            with g3:
+                st.caption("Signal weights the model has learned "
+                           "(|weight| = how much that signal matters; +favours the bet)")
+                st.dataframe(pd.DataFrame(ms.get("weights", [])), hide_index=True, width="stretch")
+            if not ready:
+                st.caption(f"Cold start — running on rules until "
+                           f"{ms.get('min_samples', 0)} trades are logged. The model column "
+                           "in the scanner activates once trained.")
+        else:
+            st.caption("Model warms up after the first closed trades.")
 
         st.subheader("📜 Opportunity log")
         st.dataframe(_opp_rows(list(s.opportunities)), hide_index=True, width="stretch", height=180)

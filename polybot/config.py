@@ -72,6 +72,13 @@ class Config:
     rsi_overbought: float = 80.0
     rsi_oversold: float = 20.0
 
+    # self-learning model (learns which signals predict correct trades)
+    learning_enabled: bool = True
+    learning_min_samples: int = 25       # trades needed before the model influences anything
+    learning_min_prob: float = 0.45      # gate: skip entries the model rates below this
+    learning_lr: float = 0.05            # SGD learning rate
+    learning_size_weight: bool = True    # scale size by the model's P(correct)
+
     # loop
     poll_interval_seconds: float = 3.0
     market_refresh_seconds: float = 30.0
