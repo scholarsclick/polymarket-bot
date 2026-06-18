@@ -86,9 +86,10 @@ def make_early_closed_trade(t: dict, exit_price: float, spot_at_close: float,
         "entry_time": t["entry_time"], "close_time": now,
         "market": t["market"], "symbol": t["symbol"],
         "duration_min": t["duration_min"], "side": t["side"],
-        "entry_price": t["entry_price"], "close_price": exit_price,
-        "exit_price": exit_price, "pnl": pnl,
-        "correct": correct, "result": "win" if correct else "loss",
+        "entry_price": t["entry_price"], "exit_price": exit_price,
+        "close_price": exit_price,
+        "entry_spot": t["candle_open"], "exit_spot": spot_at_close,
+        "pnl": pnl, "correct": correct, "result": "win" if correct else "loss",
         "reason_entry": t["reason_entry"], "reason_close": reason,
         "exit_type": exit_type,
     }
@@ -118,19 +119,23 @@ def make_closed_trade(t: dict, exit_px: float, now: float) -> dict:
     resolved_up = exit_px > t["candle_open"]
     won = ((resolved_up and t["side"] == "UP")
            or (not resolved_up and t["side"] == "DOWN"))
-    close_price = 1.0 if won else 0.0            # binary settlement value
-    pnl = t["size"] * close_price - t["size"] * t["entry_price"]
+    settle_value = 1.0 if won else 0.0           # binary settlement value of the token
+    pnl = t["size"] * settle_value - t["size"] * t["entry_price"]
     return {
         "entry_time": t["entry_time"], "close_time": now,
         "market": t["market"], "symbol": t["symbol"],
         "duration_min": t["duration_min"], "side": t["side"],
-        "entry_price": t["entry_price"], "close_price": close_price,
-        "exit_price": exit_px, "pnl": pnl, "correct": won,
-        "result": "win" if won else "loss",
+        # token prices: what we paid vs what the position settled at
+        "entry_price": t["entry_price"], "exit_price": settle_value,
+        "close_price": settle_value,
+        # underlying prices: the asset spot at entry (candle open) vs resolution
+        "entry_spot": t["candle_open"], "exit_spot": exit_px,
+        "pnl": pnl, "correct": won, "result": "win" if won else "loss",
         "exit_type": "resolution",
         "reason_entry": t["reason_entry"],
-        "reason_close": (f"market resolved {'UP' if resolved_up else 'DOWN'} "
-                         f"(open {t['candle_open']:,.2f} → close {exit_px:,.2f}); "
+        "reason_close": (f"resolved {'UP' if resolved_up else 'DOWN'}: "
+                         f"{t['symbol']} {t['candle_open']:,.2f} → {exit_px:,.2f}; "
+                         f"token {t['entry_price']:.3f} → {settle_value:.0f}; "
                          f"{'WON' if won else 'LOST'}"),
         "resolved_up": resolved_up, "won": won,
     }
@@ -461,8 +466,10 @@ class BotRunner:
                    if s.upper() in SUPPORTED_SYMBOLS]
         tf = self.timeframe
         tf_seconds = {"1m": 60, "5m": 300, "15m": 900}.get(tf, 300)
-        feed = MarketDataFeed(sources=[s for s in cfg.price_sources if s in ("binance", "coinbase")]
-                              or ["binance", "coinbase"])
+        feed_sources = [s for s in cfg.price_sources if s in ("binance", "coinbase")] \
+            or ["binance", "coinbase"]
+        feed_sources.append("hyperliquid")   # covers HYPE (not on Binance/Coinbase)
+        feed = MarketDataFeed(sources=feed_sources)
         gamma = GammaClient(cfg.gamma_host)
         gateway = ClobGateway(cfg)
         try:

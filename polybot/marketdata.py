@@ -27,6 +27,7 @@ SANITY_RANGES = {
     "XRP": (0.01, 1_000.0),
     "DOGE": (0.0001, 100.0),
     "BNB": (10.0, 100_000.0),
+    "HYPE": (0.1, 10_000.0),
 }
 # Max relative disagreement allowed between exchanges before we reject the tick.
 MAX_DIVERGENCE = 0.02  # 2%
@@ -38,8 +39,12 @@ _SPOT = {
     "coinbase": {"BTC": "BTC-USD", "ETH": "ETH-USD", "SOL": "SOL-USD",
                  "XRP": "XRP-USD", "DOGE": "DOGE-USD"},
 }
+# Hyperliquid (its own API) covers coins not on Binance/Coinbase, e.g. HYPE.
+_HL_COINS = {"HYPE"}
+_HL_INTERVAL = {"1m": "1m", "5m": "5m", "15m": "15m"}
+
 # Symbols we can trade (must have a spot feed + candles).
-SUPPORTED_SYMBOLS = ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"]
+SUPPORTED_SYMBOLS = ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE"]
 # our timeframe -> exchange granularity
 _BINANCE_TF = {"1m": "1m", "5m": "5m", "15m": "15m"}
 _COINBASE_GRAN = {"1m": 60, "5m": 300, "15m": 900}
@@ -155,6 +160,15 @@ class MarketDataFeed:
         return SpotResult(symbol, None, None, raw, error=err)
 
     def _fetch_spot(self, source: str, symbol: str) -> Optional[float]:
+        if source == "hyperliquid":
+            if symbol.upper() not in _HL_COINS:
+                return None
+            r = self._session.post("https://api.hyperliquid.xyz/info",
+                                   json={"type": "allMids"}, timeout=self.timeout)
+            r.raise_for_status()
+            mids = r.json()
+            v = mids.get(symbol.upper())
+            return float(v) if v is not None else None
         product = _SPOT.get(source, {}).get(symbol.upper())
         if not product:
             return None
@@ -188,6 +202,27 @@ class MarketDataFeed:
 
     def _fetch_candles(self, source: str, symbol: str, timeframe: str, limit: int
                        ) -> Optional[List[Candle]]:
+        if source == "hyperliquid":
+            if symbol.upper() not in _HL_COINS:
+                return None
+            interval = _HL_INTERVAL.get(timeframe)
+            if not interval:
+                return None
+            end_ms = int(time.time() * 1000)
+            start_ms = end_ms - limit * {"1m": 60, "5m": 300, "15m": 900}[timeframe] * 1000
+            r = self._session.post(
+                "https://api.hyperliquid.xyz/info",
+                json={"type": "candleSnapshot", "req": {"coin": symbol.upper(),
+                      "interval": interval, "startTime": start_ms, "endTime": end_ms}},
+                timeout=self.timeout)
+            r.raise_for_status()
+            out = []
+            for c in r.json():   # {t,T,o,h,l,c,v,...}
+                out.append(Candle(
+                    open_time=c["t"] / 1000.0, open=float(c["o"]), high=float(c["h"]),
+                    low=float(c["l"]), close=float(c["c"]), volume=float(c.get("v", 0)),
+                    close_time=c["T"] / 1000.0))
+            return out
         product = _SPOT.get(source, {}).get(symbol.upper())
         if not product:
             return None

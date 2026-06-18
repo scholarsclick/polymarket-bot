@@ -6,6 +6,7 @@ from polybot.runner import (_confidence_scale, _entry_quality_block,
 
 def _cfg(**kw):
     c = Config()
+    c.enable_early_exits = True   # these tests exercise the exit logic itself
     for k, v in kw.items():
         setattr(c, k, v)
     return c

@@ -21,7 +21,7 @@ funder: ""
 dry_run: true
 
 # --- Which markets to trade ------------------------------------------------
-symbols: ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"]   # more symbols = more markets/trades
+symbols: ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE"]   # more symbols = more markets/trades
 durations_minutes: [5, 15]         # candle lengths to trade (also tries 1, 60 if listed)
 duration_tolerance_seconds: 90     # how loosely to match a market's window to a duration
 
@@ -57,15 +57,14 @@ daily_loss_limit_pct: 0.5          # STOP for the day after losing this fraction
 max_consecutive_losses: 5          # (disabled in live for max-trades; daily pct is the real guard)
 
 # --- Exits / trade management ----------------------------------------------
-# Early exits SELL the position back into the book. (Take-profit and stop-loss
-# were removed by request — trailing stop locks gains dynamically instead.)
-enable_early_exits: true
-trailing_stop_pct: 0.15           # exit when price falls this far from its peak (0 = disabled)
-time_exit_seconds: 30             # exit this many seconds before resolution (0 = disabled)
-confidence_exit: true             # exit if trend/indicators flip against the position
-exit_confidence_min: 2            # opposing confidence required for a confidence exit
-volatility_exit: true             # exit if volatility spikes against a losing position
-volatility_exit_mult: 3.0         # vol >= entry_vol * this triggers the volatility exit
+# Early exits are OFF: every trade is HELD until the market resolves.
+enable_early_exits: false
+trailing_stop_pct: 0.15           # (only used if enable_early_exits is true)
+time_exit_seconds: 30
+confidence_exit: true
+exit_confidence_min: 2
+volatility_exit: true
+volatility_exit_mult: 3.0
 
 # --- Intelligence: entry quality + adaptive sizing -------------------------
 max_spread: 0.10                  # skip markets whose YES book spread exceeds this (0 = off)

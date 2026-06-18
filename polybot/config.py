@@ -24,7 +24,7 @@ class Config:
     dry_run: bool = True
 
     # markets
-    symbols: List[str] = field(default_factory=lambda: ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"])
+    symbols: List[str] = field(default_factory=lambda: ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE"])
     durations_minutes: List[int] = field(default_factory=lambda: [5, 15])
     duration_tolerance_seconds: int = 90
     min_seconds_to_resolution: int = 25
@@ -54,8 +54,8 @@ class Config:
     daily_loss_limit_pct: float = 0.5    # halt for the day after losing this fraction of capital
     max_consecutive_losses: int = 5
 
-    # exits / trade management (early exits sell the position back into the book)
-    enable_early_exits: bool = True
+    # exits / trade management — early exits are OFF: hold every trade to resolution
+    enable_early_exits: bool = False
     trailing_stop_pct: float = 0.15      # exit when price drops this far from peak (0 disables)
     time_exit_seconds: float = 30.0      # exit when this many seconds remain (0 disables)
     confidence_exit: bool = True         # exit if trend/indicators flip against the position

@@ -127,3 +127,29 @@ def test_validated_spot_rejects_source_divergence():
     r = f.get_validated_spot("BTC")
     assert r.price is None                                  # never silently picks one
     assert r.rejected and "diverge" in r.rejected
+
+
+class _HLSession:
+    def post(self, url, json=None, **k):
+        if json.get("type") == "allMids":
+            return _Resp({"HYPE": "27.5", "BTC": "64000"})
+        if json.get("type") == "candleSnapshot":
+            base = int(__import__("time").time() * 1000)
+            return _Resp([{"t": base + i * 60000, "T": base + (i + 1) * 60000,
+                           "o": "27", "h": "28", "l": "26", "c": "27.5", "v": "100"}
+                          for i in range(60)])
+        raise RuntimeError("unknown")
+
+
+def test_hyperliquid_spot_for_hype():
+    f = MarketDataFeed(sources=["binance", "coinbase", "hyperliquid"])
+    f._session = _HLSession()
+    r = f.get_validated_spot("HYPE")          # only hyperliquid has it
+    assert r.price == 27.5 and r.source == "hyperliquid"
+
+
+def test_hyperliquid_candles_for_hype():
+    f = MarketDataFeed(sources=["hyperliquid"])
+    f._session = _HLSession()
+    cs = f.get_candles("HYPE", "5m", limit=60)
+    assert cs and len(cs) == 60 and cs[0].close == 27.5

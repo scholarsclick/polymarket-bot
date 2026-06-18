@@ -129,7 +129,8 @@ clearly flagged (`simulator active: TRUE`). In live mode the debug panel always
 shows `simulator active: FALSE`.
 
 **Trade frequency.** The sidebar has a **Symbols** picker (BTC, ETH, SOL, XRP,
-DOGE, BNB — more symbols ⇒ more markets ⇒ more trades) and a **frequency preset**
+DOGE, BNB, **HYPE** — all on by default; more symbols ⇒ more markets ⇒ more
+trades) and a **frequency preset**
 (Balanced / Aggressive / **Max frequency ≈500/day**) that sets edge, confidence
 and spread filters, plus **max concurrent trades** and **max exposure** inputs.
 A live **pace meter** shows trades/hour and projected/day vs a 500 target, and a
@@ -166,6 +167,9 @@ What live mode does:
   but zero markets are found, so you can see immediately why.
 
 ### Trade management & early exits
+
+> **Default: early exits are OFF — every trade is held to resolution.** Set
+> `enable_early_exits: true` to re-enable the exits below.
 
 By default positions are no longer just held to resolution — they can be closed
 early by **selling the held token back into the book** to lock gains or cut

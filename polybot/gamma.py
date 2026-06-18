@@ -29,6 +29,7 @@ _SYMBOL_KEYWORDS = {
     "XRP": ["xrp", "ripple"],
     "DOGE": ["dogecoin", "doge"],
     "BNB": ["bnb"],
+    "HYPE": ["hyperliquid", "hype"],
 }
 
 _UP_OUTCOMES = {"up", "yes", "higher", "above"}

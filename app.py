@@ -57,9 +57,8 @@ with st.sidebar:
     st.divider()
     from polybot.marketdata import SUPPORTED_SYMBOLS
     symbols = st.multiselect(
-        "Symbols", SUPPORTED_SYMBOLS,
-        default=[s.upper() for s in cfg.symbols if s.upper() in SUPPORTED_SYMBOLS] or SUPPORTED_SYMBOLS,
-        help="More symbols = more markets = more trades.")
+        "Symbols", SUPPORTED_SYMBOLS, default=SUPPORTED_SYMBOLS,
+        help="More symbols = more markets = more trades. All on by default.")
 
     st.subheader("Trade frequency")
     _PRESETS = {
@@ -184,8 +183,8 @@ def _opp_rows(scanned):
 
 
 def _open_rows(trades):
-    cols = ["id", "entry", "market", "side", "size", "entry_price", "mark",
-            "uPnL", "trail", "reason"]
+    cols = ["id", "entry", "market", "side", "size", "entry_px", "entry_spot",
+            "mark", "uPnL", "reason"]
     if not trades:
         return pd.DataFrame(columns=cols)
     rows = []
@@ -193,16 +192,21 @@ def _open_rows(trades):
         rows.append({
             "id": t.get("id"), "entry": _hhmmss(t.get("entry_time")),
             "market": t.get("market"), "side": t.get("side"), "size": t.get("size"),
-            "entry_price": _f(t.get("entry_price")), "mark": _f(t.get("mark")),
-            "uPnL": f"{t.get('upnl', 0.0):+.2f}", "trail": _f(t.get("trail")),
+            "entry_px": _f(t.get("entry_price")),      # token price paid
+            "entry_spot": _spot(t.get("candle_open")), # underlying at entry
+            "mark": _f(t.get("mark")), "uPnL": f"{t.get('upnl', 0.0):+.2f}",
             "reason": t.get("reason_entry", ""),
         })
     return pd.DataFrame(rows)[cols]
 
 
+def _spot(x):
+    return f"${x:,.2f}" if x is not None else "—"
+
+
 def _closed_rows(trades):
-    cols = ["entry", "close", "market", "side", "entry_price", "close_price",
-            "pnl", "result", "exit_type", "reason_close"]
+    cols = ["entry", "close", "market", "side", "entry_px", "exit_px",
+            "entry_spot", "exit_spot", "pnl", "result"]
     if not trades:
         return pd.DataFrame(columns=cols)
     rows = []
@@ -210,10 +214,11 @@ def _closed_rows(trades):
         rows.append({
             "entry": _hhmmss(t.get("entry_time")), "close": _hhmmss(t.get("close_time")),
             "market": t.get("market"), "side": t.get("side"),
-            "entry_price": _f(t.get("entry_price")), "close_price": _f(t.get("close_price")),
+            "entry_px": _f(t.get("entry_price")),     # token price paid
+            "exit_px": _f(t.get("exit_price")),       # token settlement value (1/0)
+            "entry_spot": _spot(t.get("entry_spot")), # underlying at entry
+            "exit_spot": _spot(t.get("exit_spot")),   # underlying at resolution
             "pnl": f"{t.get('pnl', 0.0):+.2f}", "result": t.get("result"),
-            "exit_type": t.get("exit_type", "resolution"),
-            "reason_close": t.get("reason_close", ""),
         })
     return pd.DataFrame(rows)[cols]
 
@@ -410,13 +415,14 @@ def render_dashboard():
         o1, o2 = st.columns(2)
         with o1:
             st.subheader(f"📂 Open trades ({len(s.open_trades)})")
-            st.caption("mark = current sellable price · trail = live trailing-stop level")
+            st.caption("entry_px = token price paid · entry_spot = asset price at entry · "
+                       "mark = current value · held to resolution")
             st.dataframe(_open_rows(s.open_trades), hide_index=True, width="stretch", height=220)
         with o2:
             st.subheader(f"✅ Closed trades ({len(s.closed_trades)})")
-            st.caption("result = was the PREDICTION correct (direction), not just PnL · "
-                       "exit_type: trailing_stop / time_exit / confidence_exit / "
-                       "volatility_exit / resolution")
+            st.caption("entry_px/exit_px = token paid → settlement (1/0) · "
+                       "entry_spot/exit_spot = asset price at entry → resolution · "
+                       "result = prediction correct")
             st.dataframe(_closed_rows(s.closed_trades), hide_index=True, width="stretch", height=220)
 
         st.subheader("🏁 Exit performance")
