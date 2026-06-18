@@ -46,6 +46,16 @@ class RiskManager:
             return "already traded this market"
         return None
 
+    def can_enter_basic(self) -> Optional[str]:
+        """Signal-independent gate: halted state and open-position cap only."""
+        halt = self.halted()
+        if halt:
+            return halt
+        n_open = sum(1 for p in self.open_positions if p.open)
+        if n_open >= self.cfg.max_open_positions:
+            return f"max open positions ({n_open})"
+        return None
+
     # ----- sizing ----------------------------------------------------------
     def size_signal(self, signal: Signal, available_size: Optional[float] = None) -> Signal:
         """Fill in `size` and `notional` on the signal using fractional Kelly,

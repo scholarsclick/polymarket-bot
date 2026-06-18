@@ -51,6 +51,10 @@ polybot/
   strategy.py          Strategy interface + MomentumStrategy (fair-value model)
   simulate.py          offline simulation / mini-backtester (no network/keys)
   dashboard.py         live streaming dashboard (real-time feed + equity curve)
+  marketdata.py        REAL spot + OHLC candles (Binance/Coinbase) + health
+  indicators.py        EMA, RSI, MACD, ATR, volume change, body %, structure
+  patterns.py          engulfing, pin bar, inside bar, breakout, doji, momentum
+  analysis.py          trend read + opportunity decision (trend+indicators+edge)
   risk.py              Kelly sizing + risk limits
   clob.py              py-clob-client wrapper (auth, books, orders)
   executor.py          PaperExecutor + LiveExecutor
@@ -102,16 +106,50 @@ In the sidebar:
 - **Start / Stop** — the bot runs in a background thread; the page
   auto-refreshes about once per second.
 
-The dashboard shows:
+### Live mode uses REAL market data
+
+Selecting **Live (real markets)** switches the whole pipeline to real data:
+
+- **Real prices** — live BTC & ETH spot from Binance/Coinbase, refreshed every
+  poll (1–5s), with the last-updated time shown.
+- **Real candles & trend** — 1m / 5m / 15m OHLC (pick the timeframe in the
+  sidebar), with **EMA9, EMA21, RSI14, MACD, ATR, volume change, candle body %**
+  and **higher-high / lower-low** structure, combined into a
+  bullish / bearish / neutral trend.
+- **Candlestick patterns** — engulfing, pin bar / wick rejection, inside bar,
+  breakout, doji, momentum.
+- **Opportunity scanner** — for each BTC/ETH 5m & 15m Polymarket market it
+  compares the live trend + indicators against the YES/NO book price and shows
+  **🟢 OPPORTUNITY** (trend + indicators + market agree and edge ≥ min-edge),
+  **🟡 possible** (thin edge) or **⚪ no trade** (weak edge).
+- **Trade lifecycle** — separate **Open trades** and **Closed trades** tables;
+  every closed trade logs entry/close time, market, side, entry & exit price,
+  PnL, win/loss, **reason for entry** (price, trend, indicators, pattern, edge,
+  market) and **reason for close**.
+- **API health** — green/red status for the spot and candle feeds.
+
+**Safety (enforced):**
+
+- Paper mode is the default and needs no key.
+- Real orders require **both** Live mode **and** the "Execute REAL orders"
+  checkbox **and** a funded `POLYMARKET_PRIVATE_KEY`.
+- If the live feed fails, live mode **stops trading and shows a warning** — it
+  never falls back to a simulated price. Simulated prices only ever appear in
+  paper mode (and are labelled as such).
+
+Dashboard panels:
 
 | Panel | What it is |
 |---|---|
-| Balance | current equity (bankroll + realized PnL) |
-| Total entries | number of positions taken |
-| Win rate | settled wins / settled trades |
+| BTC / ETH (live) | real spot price + last-updated time (live mode) |
+| Spot / Candle API | feed health (✅/❌ + source) |
+| Balance | equity (bankroll + realized PnL) |
+| Total entries / Win rate | trades taken / settled win rate |
 | Equity curve | equity over time |
-| Scanned markets | every in-window market with spot, model fair, asks, decision |
-| Recent trades | latest entries/settlements with status and PnL |
+| Indicators | EMA/RSI/MACD/ATR/volume/body/structure per symbol |
+| Patterns & structure | detected candlestick patterns + market structure |
+| Opportunity scanner & log | per-market decision with full reason |
+| Open / Closed trades | live lifecycle with entry & close reasons |
 
 > Paper/simulated PnL is illustrative (the model matches the synthetic
 > generator by construction) — not a forward-return estimate. See the risk

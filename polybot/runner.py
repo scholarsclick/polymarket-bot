@@ -32,11 +32,72 @@ from .strategy import build_strategy, fair_up_probability
 SECONDS_PER_YEAR = 365 * 24 * 3600
 
 
+def _vol_per_sec(candles, tf_seconds: float, floor: float = 1e-6) -> float:
+    """Per-second return volatility estimated from candle closes."""
+    closes = [c.close for c in candles][-60:]
+    if len(closes) < 5:
+        return floor
+    rets = [math.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))
+            if closes[i] > 0 and closes[i - 1] > 0]
+    if len(rets) < 4:
+        return floor
+    mean = sum(rets) / len(rets)
+    var = sum((r - mean) ** 2 for r in rets) / (len(rets) - 1)
+    per_candle = math.sqrt(var)
+    return max(floor, per_candle / math.sqrt(max(1.0, tf_seconds)))
+
+
+def _health_dict(h) -> dict:
+    return {
+        "ok": h.ok, "source": h.source, "last_error": h.last_error,
+        "last_ok_ts": h.last_ok_ts, "age": h.age_seconds,
+    }
+
+
+def _analysis_dict(a) -> dict:
+    return {
+        "symbol": a.symbol, "timeframe": a.timeframe, "price": a.price,
+        "ema9": a.ema9, "ema21": a.ema21, "rsi": a.rsi,
+        "macd_hist": a.macd_hist, "atr": a.atr, "volume_change": a.volume_change,
+        "body_pct": a.body_pct, "trend": a.trend,
+        "bull_score": a.bull_score, "bear_score": a.bear_score,
+        "signals": list(a.signals),
+        "patterns": [f"{n}:{d}" for n, d in a.patterns],
+        "structure": dict(a.structure),
+        "ok": a.ok,
+    }
+
+
+def _trade_view(t: dict) -> dict:
+    return {k: v for k, v in t.items() if k != "position"}
+
+
+def make_closed_trade(t: dict, exit_px: float, now: float) -> dict:
+    """Build the closed-trade record (full lifecycle + reasons). Pure/testable."""
+    resolved_up = exit_px > t["candle_open"]
+    won = ((resolved_up and t["side"] == "UP")
+           or (not resolved_up and t["side"] == "DOWN"))
+    pnl = t["size"] * (1.0 if won else 0.0) - t["size"] * t["entry_price"]
+    return {
+        "entry_time": t["entry_time"], "close_time": now,
+        "market": t["market"], "symbol": t["symbol"],
+        "duration_min": t["duration_min"], "side": t["side"],
+        "entry_price": t["entry_price"], "exit_price": exit_px,
+        "pnl": pnl, "result": "win" if won else "loss",
+        "reason_entry": t["reason_entry"],
+        "reason_close": (f"market resolved {'UP' if resolved_up else 'DOWN'} "
+                         f"(open {t['candle_open']:,.2f} → close {exit_px:,.2f}); "
+                         f"{'WON' if won else 'LOST'}"),
+        "resolved_up": resolved_up, "won": won,
+    }
+
+
 @dataclass
 class BotState:
     mode: str = "paper"
     running: bool = False
     error: Optional[str] = None
+    warning: Optional[str] = None
     started_at: float = 0.0
     bankroll: float = 200.0
     equity: float = 200.0
@@ -49,6 +110,17 @@ class BotState:
     equity_curve: List[float] = field(default_factory=list)
     recent_trades: List[dict] = field(default_factory=list)
     scanned: List[dict] = field(default_factory=list)
+
+    # live-data fields (live mode)
+    timeframe: str = "5m"
+    data_available: bool = False
+    prices: Dict[str, dict] = field(default_factory=dict)        # sym -> {price, ts}
+    spot_health: dict = field(default_factory=dict)
+    candle_health: dict = field(default_factory=dict)
+    analyses: Dict[str, dict] = field(default_factory=dict)      # sym -> indicator/pattern snapshot
+    open_trades: List[dict] = field(default_factory=list)
+    closed_trades: List[dict] = field(default_factory=list)
+    opportunities: List[dict] = field(default_factory=list)      # opportunity log (newest first)
 
     @property
     def settled(self) -> int:
@@ -123,13 +195,15 @@ class _SimMarket:
 
 class BotRunner:
     def __init__(self, cfg: Config, mode: str = "paper", execute_orders: bool = False,
-                 time_scale: float = 12.0):
+                 time_scale: float = 12.0, timeframe: str = "5m"):
         self.cfg = cfg
         self.mode = mode
         self.execute_orders = execute_orders
         self.time_scale = time_scale
+        self.timeframe = timeframe
         self.state = BotState(mode=mode, bankroll=cfg.bankroll_usd,
-                              equity=cfg.bankroll_usd, peak=cfg.bankroll_usd)
+                              equity=cfg.bankroll_usd, peak=cfg.bankroll_usd,
+                              timeframe=timeframe)
         self.state.equity_curve.append(cfg.bankroll_usd)
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
@@ -167,6 +241,13 @@ class BotRunner:
             copy.equity_curve = list(s.equity_curve)
             copy.recent_trades = list(s.recent_trades)
             copy.scanned = list(s.scanned)
+            copy.prices = dict(s.prices)
+            copy.analyses = dict(s.analyses)
+            copy.open_trades = list(s.open_trades)
+            copy.closed_trades = list(s.closed_trades)
+            copy.opportunities = list(s.opportunities)
+            copy.spot_health = dict(s.spot_health)
+            copy.candle_health = dict(s.candle_health)
             return copy
 
     # ----- paper loop ------------------------------------------------------
@@ -289,9 +370,13 @@ class BotRunner:
                 if len(s.equity_curve) > 1000:
                     s.equity_curve = s.equity_curve[-1000:]
 
-    # ----- live loop -------------------------------------------------------
+    # ----- live loop (REAL data) ------------------------------------------
     def _run_live(self) -> None:
-        from .engine import Engine
+        from .analysis import analyze, decide_opportunity
+        from .clob import ClobGateway
+        from .executor import LiveExecutor, PaperExecutor
+        from .gamma import GammaClient
+        from .marketdata import MarketDataFeed
 
         cfg = self.cfg
         cfg.dry_run = not self.execute_orders
@@ -302,29 +387,187 @@ class BotRunner:
                                     "live data with simulated fills.")
                 self.state.running = False
             return
+
+        symbols = [s for s in (cfg.symbols or ["BTC", "ETH"]) if s.upper() in ("BTC", "ETH", "SOL")]
+        tf = self.timeframe
+        tf_seconds = {"1m": 60, "5m": 300, "15m": 900}.get(tf, 300)
+        feed = MarketDataFeed(sources=[s for s in cfg.price_sources if s in ("binance", "coinbase")]
+                              or ["binance", "coinbase"])
+        gamma = GammaClient(cfg.gamma_host)
+        gateway = ClobGateway(cfg)
         try:
-            self._engine = Engine(cfg, observer=self._on_engine_snapshot)
-            self._engine.run()
+            gateway.connect(require_auth=self.execute_orders)
         except Exception as exc:  # noqa: BLE001
             with self._lock:
-                self.state.error = f"live engine error: {exc}"
+                self.state.error = f"CLOB connect failed: {exc}"
+                self.state.running = False
+            return
+
+        strategy = build_strategy(cfg.strategy, cfg)
+        risk = RiskManager(cfg)
+        executor = LiveExecutor(gateway) if self.execute_orders else PaperExecutor(cfg.state_dir)
+
+        open_trades: Dict[str, dict] = {}     # condition_id -> trade dict
+        closed_trades: deque = deque(maxlen=200)
+        opp_log: deque = deque(maxlen=120)
+        markets_cache: List = []
+        last_discover = 0.0
+        trade_seq = 0
+        poll = max(1.0, min(5.0, cfg.poll_interval_seconds))
+
+        try:
+            while not self._stop.is_set():
+                time.sleep(poll)
+                now = time.time()
+
+                # 1) live spot + candles (REAL). No fake fallback.
+                prices, candles, analyses = {}, {}, {}
+                data_ok = True
+                for sym in symbols:
+                    spot = feed.get_spot(sym)
+                    cs = feed.get_candles(sym, tf, limit=120)
+                    if spot is None or not cs:
+                        data_ok = False
+                        continue
+                    prices[sym] = {"price": spot, "ts": now}
+                    candles[sym] = cs
+                    analyses[sym] = analyze(sym, tf, cs)
+
+                if not data_ok or not prices:
+                    # req 9: stop trading, warn, never use fake prices
+                    self._commit_live(
+                        risk, feed, prices, analyses, open_trades, closed_trades,
+                        opp_log, tf, data_available=False,
+                        warning="Live data unavailable — trading paused. "
+                                f"spot: {feed.spot_health.last_error or 'n/a'} | "
+                                f"candles: {feed.candle_health.last_error or 'n/a'}")
+                    continue
+
+                # 2) discover Polymarket BTC/ETH 5m & 15m markets
+                if now - last_discover > cfg.market_refresh_seconds or not markets_cache:
+                    try:
+                        markets_cache = gamma.discover(symbols, cfg.durations_minutes,
+                                                       cfg.duration_tolerance_seconds)
+                    except Exception as exc:  # noqa: BLE001
+                        markets_cache = markets_cache or []
+                        self._set_warning(f"market discovery failed: {exc}")
+                    last_discover = now
+
+                risk.consecutive_losses = 0  # independent windows for the demo
+                risk.realized_pnl_today = 0.0
+
+                # 3) evaluate each market
+                scanned = []
+                for m in markets_cache:
+                    if m.symbol not in analyses or m.end_time <= now:
+                        continue
+                    sec_left = m.seconds_to_resolution(now)
+                    if sec_left > cfg.max_seconds_to_resolution:
+                        continue
+                    cs = candles[m.symbol]
+                    spot = prices[m.symbol]["price"]
+                    candle_open = feed.candle_open_at(cs, m.start_time) or cs[-1].open
+                    vol_ps = _vol_per_sec(cs, tf_seconds)
+                    try:
+                        up_q = gateway.get_quote(m.up_token_id)
+                        dn_q = gateway.get_quote(m.down_token_id)
+                    except Exception:  # noqa: BLE001
+                        continue
+
+                    opp = decide_opportunity(
+                        analyses[m.symbol], m.question, m.duration_minutes, sec_left,
+                        candle_open, spot, vol_ps, up_q.best_ask, dn_q.best_ask, cfg.min_edge)
+                    opp_row = {
+                        "time": now, "symbol": m.symbol, "market": m.question[:48],
+                        "duration_min": m.duration_minutes, "seconds_left": sec_left,
+                        "action": opp.action, "side": opp.side.value if opp.side else "—",
+                        "edge": opp.edge, "fair": opp.fair, "reason": opp.reason,
+                    }
+                    scanned.append(opp_row)
+
+                    already = m.condition_id in open_trades
+                    in_window = sec_left >= cfg.min_seconds_to_resolution
+                    if (opp.action == "enter" and not already and in_window
+                            and risk.can_enter_basic() is None):
+                        from .models import Signal
+                        sig = Signal(market=m, side=opp.side, token_id=m.token_id(opp.side),
+                                     fair_value=opp.fair, price=opp.market_price, edge=opp.edge,
+                                     reason=opp.reason)
+                        avail = up_q.ask_size if opp.side is Side.UP else dn_q.ask_size
+                        sig = risk.size_signal(sig, available_size=avail)
+                        if sig.size > 0:
+                            pos = executor.place(sig)
+                            if pos:
+                                risk.register_entry(pos)
+                                trade_seq += 1
+                                open_trades[m.condition_id] = {
+                                    "id": trade_seq, "entry_time": now,
+                                    "market": m.question[:48], "symbol": m.symbol,
+                                    "duration_min": m.duration_minutes, "side": opp.side.value,
+                                    "size": sig.size, "entry_price": sig.price,
+                                    "candle_open": candle_open, "end_time": m.end_time,
+                                    "reason_entry": opp.reason, "position": pos,
+                                }
+                                opp_log.appendleft({**opp_row, "action": "ENTER"})
+
+                # 4) settle expired open trades
+                for cid in [c for c, t in open_trades.items() if now >= t["end_time"]]:
+                    t = open_trades.pop(cid)
+                    exit_px = feed.get_spot(t["symbol"]) or prices.get(t["symbol"], {}).get("price")
+                    if exit_px is None:
+                        open_trades[cid] = t  # retry next loop
+                        continue
+                    rec = make_closed_trade(t, exit_px, now)
+                    if isinstance(executor, PaperExecutor):
+                        executor.settle(t["position"], rec["resolved_up"])
+                    else:
+                        t["position"].open = False
+                        t["position"].pnl = rec["pnl"]
+                    risk.register_settlement(t["position"])
+                    closed_trades.appendleft({k: v for k, v in rec.items()
+                                              if k not in ("resolved_up", "won")})
+
+                self._commit_live(risk, feed, prices, analyses, open_trades, closed_trades,
+                                  opp_log, tf, data_available=True,
+                                  warning=None, scanned=scanned)
+        except Exception as exc:  # noqa: BLE001
+            with self._lock:
+                self.state.error = f"live loop error: {exc}"
         finally:
             with self._lock:
                 self.state.running = False
 
-    def _on_engine_snapshot(self, snap: dict) -> None:
+    def _set_warning(self, msg: str) -> None:
+        with self._lock:
+            self.state.warning = msg
+
+    def _commit_live(self, risk, feed, prices, analyses, open_trades, closed_trades,
+                     opp_log, timeframe, data_available, warning, scanned=None) -> None:
+        closed = list(closed_trades)
+        wins = sum(1 for t in closed if t["result"] == "win")
+        losses = sum(1 for t in closed if t["result"] == "loss")
+        realized = sum(t["pnl"] for t in closed)
+        equity = self.cfg.bankroll_usd + realized
         with self._lock:
             s = self.state
-            s.entries = snap["entries"]
-            s.wins, s.losses = snap["wins"], snap["losses"]
-            s.realized = snap["realized"]
-            s.equity = snap["equity"]
-            s.peak = max(s.peak, snap["equity"])
-            s.exposure = snap["exposure"]
-            s.error = snap.get("halted")
-            s.recent_trades = snap["recent_trades"]
-            s.scanned = sorted(snap["scanned"], key=lambda d: d.get("seconds_left", 0))
-            if not s.equity_curve or abs(s.equity_curve[-1] - snap["equity"]) > 1e-9:
-                s.equity_curve.append(snap["equity"])
+            s.timeframe = timeframe
+            s.data_available = data_available
+            s.warning = warning
+            s.prices = dict(prices)
+            s.spot_health = _health_dict(feed.spot_health)
+            s.candle_health = _health_dict(feed.candle_health)
+            s.analyses = {sym: _analysis_dict(a) for sym, a in analyses.items()}
+            s.open_trades = [_trade_view(t) for t in open_trades.values()]
+            s.closed_trades = closed
+            if scanned is not None:
+                s.scanned = sorted(scanned, key=lambda d: d["seconds_left"])
+                s.opportunities = list(opp_log)
+            s.entries = len(open_trades) + len(closed)
+            s.wins, s.losses, s.realized = wins, losses, realized
+            s.equity = equity
+            s.peak = max(s.peak, equity)
+            s.exposure = risk.current_exposure()
+            if not s.equity_curve or abs(s.equity_curve[-1] - equity) > 1e-9:
+                s.equity_curve.append(equity)
                 if len(s.equity_curve) > 1000:
                     s.equity_curve = s.equity_curve[-1000:]

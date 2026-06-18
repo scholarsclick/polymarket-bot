@@ -1,7 +1,37 @@
 import time
 
 from polybot.config import Config
-from polybot.runner import BotRunner
+from polybot.runner import BotRunner, make_closed_trade
+
+
+def _open_trade(side="UP", entry_price=0.55, size=10, candle_open=100.0):
+    return {
+        "id": 1, "entry_time": 1000.0, "market": "BTC up or down 5m",
+        "symbol": "BTC", "duration_min": 5, "side": side, "size": size,
+        "entry_price": entry_price, "candle_open": candle_open,
+        "end_time": 1300.0, "reason_entry": "trend bullish + edge",
+    }
+
+
+def test_close_logging_win_records_all_fields():
+    t = _open_trade(side="UP", entry_price=0.55, size=10, candle_open=100.0)
+    rec = make_closed_trade(t, exit_px=100.8, now=1305.0)  # closed UP -> UP wins
+    for field in ("entry_time", "close_time", "market", "side", "entry_price",
+                  "exit_price", "pnl", "result", "reason_entry", "reason_close"):
+        assert field in rec
+    assert rec["result"] == "win"
+    assert abs(rec["pnl"] - (10 * 1.0 - 10 * 0.55)) < 1e-9   # +4.5
+    assert rec["exit_price"] == 100.8
+    assert "WON" in rec["reason_close"]
+    assert "trend bullish" in rec["reason_entry"]
+
+
+def test_close_logging_loss():
+    t = _open_trade(side="UP", entry_price=0.6, size=10, candle_open=100.0)
+    rec = make_closed_trade(t, exit_px=99.5, now=1305.0)    # closed DOWN -> UP loses
+    assert rec["result"] == "loss"
+    assert abs(rec["pnl"] - (-10 * 0.6)) < 1e-9             # -6.0
+    assert "LOST" in rec["reason_close"]
 
 
 def _cfg():

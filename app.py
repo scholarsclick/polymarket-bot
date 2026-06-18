@@ -2,15 +2,16 @@
 
     streamlit run app.py
 
-Paper mode runs a self-contained simulator (no network, no private key).
-Live mode drives the real engine against Polymarket; reading real markets with
-simulated fills needs only network access, while placing real orders requires a
-funded private key in `.env`.
+Paper mode runs a self-contained simulator (no network, no private key) — its
+prices are clearly labelled simulated. Live mode uses REAL Binance/Coinbase
+spot + candles and real Polymarket books: it shows live BTC/ETH prices,
+indicators, patterns, an opportunity scanner and full trade lifecycle. If the
+live data feed fails, live mode stops trading and shows a warning (never a fake
+price).
 """
 
 from __future__ import annotations
 
-import time
 from datetime import datetime
 
 import pandas as pd
@@ -35,22 +36,20 @@ with st.sidebar:
     st.caption("Polymarket short-term crypto bot (BTC/ETH 5m & 15m)")
 
     mode_label = st.radio(
-        "Mode",
-        ["Paper (simulated)", "Live (real markets)"],
-        help="Paper runs an offline simulator and needs no private key. "
-             "Live connects to Polymarket.",
-    )
+        "Mode", ["Paper (simulated)", "Live (real markets)"],
+        help="Paper runs an offline simulator (no key). Live uses real "
+             "Binance/Coinbase data and real Polymarket markets.")
     is_live = mode_label.startswith("Live")
+
+    timeframe = st.selectbox("Candle timeframe", ["1m", "5m", "15m"], index=1)
 
     execute_orders = False
     if is_live:
         execute_orders = st.checkbox(
             "Execute REAL orders (requires funded key)", value=False,
-            help="Off = read real markets, simulate fills (network only). "
-                 "On = place real orders with real funds.",
-        )
-        has_key = bool(cfg.private_key)
-        st.caption(f"🔑 Private key in .env: {'✅ yes' if has_key else '❌ no'}")
+            help="Off = real data + simulated fills (network only). "
+                 "On = place real orders with real funds.")
+        st.caption(f"🔑 Private key in .env: {'✅ yes' if cfg.private_key else '❌ no'}")
         if execute_orders:
             st.warning("Real funds at risk in this mode.", icon="⚠️")
     else:
@@ -69,9 +68,6 @@ with st.sidebar:
     stop = c2.button("⏹ Stop", width="stretch")
 
 
-# --------------------------------------------------------------------------
-# Start / stop handling
-# --------------------------------------------------------------------------
 if start:
     if st.session_state.runner is not None:
         st.session_state.runner.stop()
@@ -79,11 +75,8 @@ if start:
     cfg.min_edge = min_edge
     cfg.max_position_usd = max_pos
     cfg.kelly_fraction = kelly
-    runner = BotRunner(
-        cfg,
-        mode="live" if is_live else "paper",
-        execute_orders=execute_orders,
-    )
+    runner = BotRunner(cfg, mode="live" if is_live else "paper",
+                       execute_orders=execute_orders, timeframe=timeframe)
     runner.start()
     st.session_state.runner = runner
 
@@ -92,24 +85,84 @@ if stop and st.session_state.runner is not None:
 
 
 # --------------------------------------------------------------------------
-# Main view (auto-refreshing fragment)
+# formatting helpers
 # --------------------------------------------------------------------------
-def _fmt_trades(rows):
-    if not rows:
-        return pd.DataFrame(columns=["time", "market", "side", "size", "price", "status", "pnl"])
-    df = pd.DataFrame(rows)
-    df["time"] = df["time"].apply(lambda t: datetime.fromtimestamp(t).strftime("%H:%M:%S"))
-    df["market"] = df["symbol"] + " " + df["duration_min"].astype(str) + "m"
-    df["price"] = df["price"].map(lambda p: f"{p:.3f}")
-    df["pnl"] = df["pnl"].map(lambda p: f"{p:+.2f}")
-    return df[["time", "market", "side", "size", "price", "status", "pnl"]]
+def _hhmmss(ts):
+    return datetime.fromtimestamp(ts).strftime("%H:%M:%S") if ts else "—"
 
 
-def _fmt_scanned(rows):
-    cols = ["market", "t_left", "spot", "fair_up", "up_ask", "down_ask", "decision"]
-    if not rows:
+def _indicator_rows(analyses: dict) -> pd.DataFrame:
+    rows = []
+    for sym, a in analyses.items():
+        rows.append({
+            "symbol": sym, "trend": a["trend"].upper(),
+            "EMA9": f"{a['ema9']:,.2f}" if a["ema9"] else "—",
+            "EMA21": f"{a['ema21']:,.2f}" if a["ema21"] else "—",
+            "RSI14": f"{a['rsi']:.1f}" if a["rsi"] is not None else "—",
+            "MACD hist": f"{a['macd_hist']:+.2f}" if a["macd_hist"] is not None else "—",
+            "ATR": f"{a['atr']:,.2f}" if a["atr"] else "—",
+            "vol Δ%": f"{a['volume_change']:+.1f}" if a["volume_change"] is not None else "—",
+            "body %": f"{a['body_pct']:.0f}" if a["body_pct"] is not None else "—",
+            "score": f"{a['bull_score']}↑/{a['bear_score']}↓",
+        })
+    return pd.DataFrame(rows)
+
+
+def _pattern_rows(analyses: dict) -> pd.DataFrame:
+    rows = []
+    for sym, a in analyses.items():
+        rows.append({
+            "symbol": sym,
+            "patterns": ", ".join(a["patterns"]) or "—",
+            "structure": ", ".join(k for k, v in a["structure"].items() if v) or "—",
+            "signals": ", ".join(a["signals"]) or "—",
+        })
+    return pd.DataFrame(rows)
+
+
+def _opp_rows(scanned: list) -> pd.DataFrame:
+    cols = ["market", "t_left", "action", "side", "edge", "fair", "reason"]
+    if not scanned:
         return pd.DataFrame(columns=cols)
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame(scanned)
+    df["t_left"] = df["seconds_left"].map(lambda s: f"{s:.0f}s")
+    df["edge"] = df["edge"].map(lambda e: f"{e:+.3f}")
+    df["fair"] = df["fair"].map(lambda f: f"{f:.3f}")
+    df["action"] = df["action"].map({"enter": "🟢 OPPORTUNITY", "possible": "🟡 possible",
+                                     "no_trade": "⚪ no trade"}).fillna(df["action"])
+    return df[cols]
+
+
+def _open_rows(trades: list) -> pd.DataFrame:
+    cols = ["id", "entry", "market", "side", "size", "entry_price", "reason"]
+    if not trades:
+        return pd.DataFrame(columns=cols)
+    df = pd.DataFrame(trades)
+    df["entry"] = df["entry_time"].map(_hhmmss)
+    df["entry_price"] = df["entry_price"].map(lambda p: f"{p:.3f}")
+    df["reason"] = df["reason_entry"]
+    return df[cols]
+
+
+def _closed_rows(trades: list) -> pd.DataFrame:
+    cols = ["entry", "close", "market", "side", "entry_price", "exit_price",
+            "pnl", "result", "reason_entry", "reason_close"]
+    if not trades:
+        return pd.DataFrame(columns=cols)
+    df = pd.DataFrame(trades)
+    df["entry"] = df["entry_time"].map(_hhmmss)
+    df["close"] = df["close_time"].map(_hhmmss)
+    df["entry_price"] = df["entry_price"].map(lambda p: f"{p:.3f}")
+    df["exit_price"] = df["exit_price"].map(lambda p: f"${p:,.2f}")
+    df["pnl"] = df["pnl"].map(lambda p: f"{p:+.2f}")
+    return df[cols]
+
+
+def _sim_scanned_rows(scanned: list) -> pd.DataFrame:
+    cols = ["market", "t_left", "spot", "fair_up", "up_ask", "down_ask", "decision"]
+    if not scanned:
+        return pd.DataFrame(columns=cols)
+    df = pd.DataFrame(scanned)
     df["market"] = df["symbol"] + " " + df["duration_min"].astype(str) + "m"
     df["t_left"] = df["seconds_left"].map(lambda s: f"{s:.0f}s")
     df["spot"] = df["spot"].map(lambda s: f"${s:,.2f}")
@@ -119,6 +172,9 @@ def _fmt_scanned(rows):
     return df[cols]
 
 
+# --------------------------------------------------------------------------
+# main view (auto-refreshing fragment)
+# --------------------------------------------------------------------------
 @st.fragment(run_every=1.0)
 def render_dashboard():
     runner = st.session_state.runner
@@ -130,14 +186,34 @@ def render_dashboard():
 
     s = runner.snapshot()
 
-    # status line
     if s.error:
         st.error(s.error)
+    if s.warning:
+        st.warning(s.warning, icon="⚠️")
     badge = "🟢 RUNNING" if s.running else "🔴 STOPPED"
-    sim_note = " · simulated feed" if s.mode == "paper" else " · real markets"
-    st.markdown(f"**{badge}**  ·  mode: `{s.mode}`{sim_note}")
+    st.markdown(f"**{badge}** · mode: `{s.mode}` · timeframe: `{s.timeframe}`")
 
-    # metrics
+    live = s.mode == "live"
+
+    # ---- live data header: prices + API health ----
+    if live:
+        h1, h2, h3, h4 = st.columns(4)
+        btc = s.prices.get("BTC"); eth = s.prices.get("ETH")
+        h1.metric("BTC (live)", f"${btc['price']:,.2f}" if btc else "—",
+                  f"upd {_hhmmss(btc['ts'])}" if btc else "no data")
+        h2.metric("ETH (live)", f"${eth['price']:,.2f}" if eth else "—",
+                  f"upd {_hhmmss(eth['ts'])}" if eth else "no data")
+        sok = s.spot_health.get("ok"); cok = s.candle_health.get("ok")
+        h3.metric("Spot API", "✅ ok" if sok else "❌ down",
+                  s.spot_health.get("source") or (s.spot_health.get("last_error") or "")[:24])
+        h4.metric("Candle API", "✅ ok" if cok else "❌ down",
+                  s.candle_health.get("source") or (s.candle_health.get("last_error") or "")[:24])
+        if not s.data_available:
+            st.error("Live data unavailable — trading is paused. No simulated prices are shown.")
+    else:
+        st.caption("🧪 Paper mode — prices below are **simulated**, not live market data.")
+
+    # ---- common account metrics ----
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Balance", f"${s.equity:,.2f}", f"{s.equity - s.bankroll:+,.2f}")
     m2.metric("Total entries", s.entries)
@@ -145,20 +221,46 @@ def render_dashboard():
     m4.metric("Realized PnL", f"${s.realized:+,.2f}")
     m5.metric("Open exposure", f"${s.exposure:,.2f}")
 
-    # equity curve
     st.subheader("📈 Equity curve")
     if len(s.equity_curve) > 1:
-        st.line_chart(pd.DataFrame({"equity ($)": s.equity_curve}), height=260)
+        st.line_chart(pd.DataFrame({"equity ($)": s.equity_curve}), height=240)
     else:
-        st.caption("Waiting for the first settled market…")
+        st.caption("Waiting for the first settled trade…")
 
-    left, right = st.columns(2)
-    with left:
-        st.subheader("🔎 Scanned markets")
-        st.dataframe(_fmt_scanned(s.scanned), hide_index=True, width="stretch", height=300)
-    with right:
-        st.subheader("🧾 Recent trades")
-        st.dataframe(_fmt_trades(s.recent_trades), hide_index=True, width="stretch", height=300)
+    if live:
+        st.subheader("📊 Indicators")
+        st.dataframe(_indicator_rows(s.analyses), hide_index=True, width="stretch")
+        st.subheader("🕯️ Patterns & structure")
+        st.dataframe(_pattern_rows(s.analyses), hide_index=True, width="stretch")
+
+        st.subheader("🔭 Opportunity scanner")
+        st.dataframe(_opp_rows(s.scanned), hide_index=True, width="stretch", height=240)
+
+        oc1, oc2 = st.columns(2)
+        with oc1:
+            st.subheader(f"📂 Open trades ({len(s.open_trades)})")
+            st.dataframe(_open_rows(s.open_trades), hide_index=True, width="stretch", height=240)
+        with oc2:
+            st.subheader(f"✅ Closed trades ({len(s.closed_trades)})")
+            st.dataframe(_closed_rows(s.closed_trades), hide_index=True, width="stretch", height=240)
+
+        st.subheader("📜 Opportunity log")
+        st.dataframe(_opp_rows(list(s.opportunities)), hide_index=True, width="stretch", height=200)
+    else:
+        left, right = st.columns(2)
+        with left:
+            st.subheader("🔎 Scanned markets (simulated)")
+            st.dataframe(_sim_scanned_rows(s.scanned), hide_index=True, width="stretch", height=300)
+        with right:
+            st.subheader("🧾 Recent trades (simulated)")
+            df = pd.DataFrame(s.recent_trades)
+            if not df.empty:
+                df["time"] = df["time"].map(_hhmmss)
+                df["market"] = df["symbol"] + " " + df["duration_min"].astype(str) + "m"
+                df["price"] = df["price"].map(lambda p: f"{p:.3f}")
+                df["pnl"] = df["pnl"].map(lambda p: f"{p:+.2f}")
+                df = df[["time", "market", "side", "size", "price", "status", "pnl"]]
+            st.dataframe(df, hide_index=True, width="stretch", height=300)
 
     st.caption(f"Updated {datetime.now().strftime('%H:%M:%S')} · "
                "Paper/sim PnL is illustrative, not a forward-return estimate.")

@@ -15,6 +15,45 @@ class Side(str, Enum):
 
 
 @dataclass
+class Candle:
+    """A single OHLCV candle from an exchange."""
+
+    open_time: float   # unix seconds
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+    close_time: float = 0.0
+
+    @property
+    def bullish(self) -> bool:
+        return self.close >= self.open
+
+    @property
+    def body(self) -> float:
+        return abs(self.close - self.open)
+
+    @property
+    def range(self) -> float:
+        return self.high - self.low
+
+    @property
+    def upper_wick(self) -> float:
+        return self.high - max(self.open, self.close)
+
+    @property
+    def lower_wick(self) -> float:
+        return min(self.open, self.close) - self.low
+
+    @property
+    def body_pct(self) -> float:
+        """Body size as a percent of the full high-low range (0..100)."""
+        rng = self.range
+        return (self.body / rng * 100.0) if rng > 0 else 0.0
+
+
+@dataclass
 class CryptoMarket:
     """A single short-term crypto up/down market on Polymarket."""
 
