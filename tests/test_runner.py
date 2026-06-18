@@ -20,6 +20,7 @@ def test_close_logging_win_records_all_fields():
                   "exit_price", "pnl", "result", "reason_entry", "reason_close"):
         assert field in rec
     assert rec["result"] == "win"
+    assert rec["close_price"] == 1.0                         # binary settlement
     assert abs(rec["pnl"] - (10 * 1.0 - 10 * 0.55)) < 1e-9   # +4.5
     assert rec["exit_price"] == 100.8
     assert "WON" in rec["reason_close"]
@@ -30,6 +31,7 @@ def test_close_logging_loss():
     t = _open_trade(side="UP", entry_price=0.6, size=10, candle_open=100.0)
     rec = make_closed_trade(t, exit_px=99.5, now=1305.0)    # closed DOWN -> UP loses
     assert rec["result"] == "loss"
+    assert rec["close_price"] == 0.0
     assert abs(rec["pnl"] - (-10 * 0.6)) < 1e-9             # -6.0
     assert "LOST" in rec["reason_close"]
 

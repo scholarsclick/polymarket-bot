@@ -19,6 +19,15 @@ from .models import Candle
 
 log = logging.getLogger("polybot.marketdata")
 
+# Plausible spot ranges — anything outside is rejected as a bad/garbage tick.
+SANITY_RANGES = {
+    "BTC": (1_000.0, 1_000_000.0),
+    "ETH": (50.0, 100_000.0),
+    "SOL": (1.0, 100_000.0),
+}
+# Max relative disagreement allowed between exchanges before we reject the tick.
+MAX_DIVERGENCE = 0.02  # 2%
+
 # our symbol -> exchange product id
 _SPOT = {
     "binance": {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT"},
@@ -27,6 +36,24 @@ _SPOT = {
 # our timeframe -> exchange granularity
 _BINANCE_TF = {"1m": "1m", "5m": "5m", "15m": "15m"}
 _COINBASE_GRAN = {"1m": 60, "5m": 300, "15m": 900}
+
+
+def price_in_range(symbol: str, price: Optional[float]) -> bool:
+    """True if `price` is a plausible spot for `symbol`."""
+    if price is None or price <= 0:
+        return False
+    lo, hi = SANITY_RANGES.get(symbol.upper(), (0.0, float("inf")))
+    return lo <= price <= hi
+
+
+@dataclass
+class SpotResult:
+    symbol: str
+    price: Optional[float]            # validated price, or None if rejected
+    source: Optional[str]            # exchange the price came from
+    raw: dict                        # source -> price or reason string
+    error: Optional[str] = None      # set when no usable price
+    rejected: Optional[str] = None   # set when a price was rejected (sanity/divergence)
 
 
 @dataclass
@@ -76,6 +103,49 @@ class MarketDataFeed:
                 errors.append(f"{src}: {exc}")
         self.spot_health.mark_fail("; ".join(errors) or "no source returned a price")
         return None
+
+    def get_validated_spot(self, symbol: str, max_divergence: float = MAX_DIVERGENCE
+                           ) -> SpotResult:
+        """Query every source, apply a sanity-range check, and cross-check the
+        exchanges against each other. Returns a SpotResult; `price` is None if
+        no source produced a usable, agreeing price. NEVER falls back to a
+        synthetic value. Sources are tried in priority order (Binance, then
+        Coinbase) for the chosen price."""
+        raw: dict = {}
+        valid: dict = {}
+        for src in self.sources:
+            try:
+                p = self._fetch_spot(src, symbol)
+            except Exception as exc:  # noqa: BLE001
+                raw[src] = f"error: {exc}"
+                continue
+            if p is None or p <= 0:
+                raw[src] = "no price"
+                continue
+            if not price_in_range(symbol, p):
+                raw[src] = f"out-of-range {p}"
+                continue
+            raw[src] = p
+            valid[src] = p
+
+        # cross-source divergence check (needs >= 2 valid sources)
+        if len(valid) >= 2:
+            vals = list(valid.values())
+            mn, mx = min(vals), max(vals)
+            if mn > 0 and (mx - mn) / mn > max_divergence:
+                reason = f"sources diverge {(mx - mn) / mn:.2%} > {max_divergence:.0%}"
+                self.spot_health.mark_fail(reason)
+                return SpotResult(symbol, None, None, raw, error=None, rejected=reason)
+
+        # pick by source priority (Binance first, then Coinbase)
+        for src in self.sources:
+            if src in valid:
+                self.spot_health.mark_ok(src)
+                return SpotResult(symbol, valid[src], src, raw)
+
+        err = "; ".join(f"{k}: {v}" for k, v in raw.items()) or "no source returned a price"
+        self.spot_health.mark_fail(err)
+        return SpotResult(symbol, None, None, raw, error=err)
 
     def _fetch_spot(self, source: str, symbol: str) -> Optional[float]:
         product = _SPOT.get(source, {}).get(symbol.upper())

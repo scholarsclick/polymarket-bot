@@ -86,74 +86,78 @@ exchange (Polymarket's UI does this the first time you trade).
 
 ## Browser dashboard (Streamlit)
 
-A point-and-click dashboard with a live equity curve, balance, entries, win
-rate, recent trades, and the markets currently being scanned.
-
 ```bash
 pip install -r requirements.txt     # includes streamlit + pandas
 streamlit run app.py                 # opens http://localhost:8501
 ```
 
-In the sidebar:
+### Exact commands
 
-- **Mode** — *Paper (simulated)* runs an offline simulator and needs **no
-  private key**; *Live (real markets)* connects to Polymarket.
-  - In live mode, leave **"Execute REAL orders"** unchecked to read real
-    markets and books while simulating fills (needs only network access).
-    Check it to place real orders — this requires a funded
-    `POLYMARKET_PRIVATE_KEY` in `.env`.
-- **Parameters** — bankroll, min-edge, max position, and Kelly fraction.
-- **Start / Stop** — the bot runs in a background thread; the page
-  auto-refreshes about once per second.
+**Windows (PowerShell or Command Prompt):**
 
-### Live mode uses REAL market data
+```bat
+cd path\to\polymarket-bot
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+streamlit run app.py
+```
 
-Selecting **Live (real markets)** switches the whole pipeline to real data:
+(If `streamlit` isn't recognised, use `python -m streamlit run app.py`.)
+Then open the URL it prints (default http://localhost:8501).
 
-- **Real prices** — live BTC & ETH spot from Binance/Coinbase, refreshed every
-  poll (1–5s), with the last-updated time shown.
-- **Real candles & trend** — 1m / 5m / 15m OHLC (pick the timeframe in the
-  sidebar), with **EMA9, EMA21, RSI14, MACD, ATR, volume change, candle body %**
-  and **higher-high / lower-low** structure, combined into a
-  bullish / bearish / neutral trend.
-- **Candlestick patterns** — engulfing, pin bar / wick rejection, inside bar,
-  breakout, doji, momentum.
-- **Opportunity scanner** — for each BTC/ETH 5m & 15m Polymarket market it
-  compares the live trend + indicators against the YES/NO book price and shows
-  **🟢 OPPORTUNITY** (trend + indicators + market agree and edge ≥ min-edge),
-  **🟡 possible** (thin edge) or **⚪ no trade** (weak edge).
-- **Trade lifecycle** — separate **Open trades** and **Closed trades** tables;
-  every closed trade logs entry/close time, market, side, entry & exit price,
-  PnL, win/loss, **reason for entry** (price, trend, indicators, pattern, edge,
-  market) and **reason for close**.
-- **API health** — green/red status for the spot and candle feeds.
+**macOS / Linux:**
+
+```bash
+cd path/to/polymarket-bot
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+### Modes (sidebar)
+
+| Mode | Data | Orders | Key needed |
+|---|---|---|---|
+| **🟢 Live Data Paper Trading** (default) | **REAL** BTC/ETH prices + **REAL** Polymarket books | paper (simulated fills) | **No** |
+| 🧪 Simulator Test Mode | synthetic (dev/testing only) | paper | No |
+| 🔴 Live Real Orders | REAL | **real money** | Yes (+ confirm checkbox) |
+
+**Live Data Paper Trading is the default and uses real market data** — it never
+shows simulator prices. The simulator lives only in its own test mode and is
+clearly flagged (`simulator active: TRUE`). In live mode the debug panel always
+shows `simulator active: FALSE`.
+
+What live mode does:
+
+- **Real prices** — BTC & ETH spot from **Binance, falling back to Coinbase**,
+  refreshed every 1–5s, showing the **exact source** and **last-updated time**.
+  Prices are sanity-checked (rejected if outside a plausible range or if the two
+  exchanges disagree by >2%) — it never silently substitutes a fake price.
+- **Real candles** — 1m / 5m / 15m OHLC (timeframe selector), with the latest
+  candle **close time** shown in the debug panel.
+- **Indicators** — EMA9, EMA21, RSI14, MACD, ATR, volume change, candle body %,
+  higher-high / lower-low structure → bullish / bearish / neutral trend.
+- **Patterns** — engulfing, pin bar / wick rejection, inside bar, breakout, doji,
+  momentum.
+- **Real Polymarket markets** — BTC/ETH 5m & 15m: question, expiry, YES price,
+  NO price, spread, liquidity, plus Polymarket API status.
+- **Opportunity scanner** — combines trend + indicators + market price into
+  **🟢 TRADE / 🟡 possible / ⚪ NO TRADE** with a **confidence score** and full
+  reason. Tune **Edge threshold** and **Min confidence** in the sidebar.
+- **Trade lifecycle** — **Open trades** show live mark price + unrealized PnL;
+  **Closed trades** show entry & close time, entry price, close price, settle
+  spot, PnL, win/loss, and the entry & close reasons.
+- **Debug panel** — raw per-source spot responses, candle source + close time,
+  Polymarket API status, and the `simulator active` flag.
 
 **Safety (enforced):**
 
-- Paper mode is the default and needs no key.
-- Real orders require **both** Live mode **and** the "Execute REAL orders"
-  checkbox **and** a funded `POLYMARKET_PRIVATE_KEY`.
-- If the live feed fails, live mode **stops trading and shows a warning** — it
-  never falls back to a simulated price. Simulated prices only ever appear in
-  paper mode (and are labelled as such).
-
-Dashboard panels:
-
-| Panel | What it is |
-|---|---|
-| BTC / ETH (live) | real spot price + last-updated time (live mode) |
-| Spot / Candle API | feed health (✅/❌ + source) |
-| Balance | equity (bankroll + realized PnL) |
-| Total entries / Win rate | trades taken / settled win rate |
-| Equity curve | equity over time |
-| Indicators | EMA/RSI/MACD/ATR/volume/body/structure per symbol |
-| Patterns & structure | detected candlestick patterns + market structure |
-| Opportunity scanner & log | per-market decision with full reason |
-| Open / Closed trades | live lifecycle with entry & close reasons |
-
-> Paper/simulated PnL is illustrative (the model matches the synthetic
-> generator by construction) — not a forward-return estimate. See the risk
-> warning at the top.
+- Default mode is Live Data Paper Trading; **no private key required**.
+- Real orders require Live Real Orders mode **and** the confirmation checkbox
+  **and** a funded `POLYMARKET_PRIVATE_KEY` — three explicit steps.
+- If live data is unavailable, the bot **pauses and shows a warning**; it never
+  falls back to a simulated price in live mode.
 
 Run it headless / on a server with
 `streamlit run app.py --server.headless true --server.port 8501`.

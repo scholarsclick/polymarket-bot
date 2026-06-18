@@ -2,12 +2,11 @@
 
     streamlit run app.py
 
-Paper mode runs a self-contained simulator (no network, no private key) — its
-prices are clearly labelled simulated. Live mode uses REAL Binance/Coinbase
-spot + candles and real Polymarket books: it shows live BTC/ETH prices,
-indicators, patterns, an opportunity scanner and full trade lifecycle. If the
-live data feed fails, live mode stops trading and shows a warning (never a fake
-price).
+Default mode is **Live Data Paper Trading**: real BTC/ETH prices (Binance →
+Coinbase), real Polymarket BTC/ETH 5m & 15m markets/order books, and PAPER
+fills — no wallet, no funds, no real orders. The simulator is a *separate* test
+mode and never feeds prices into the live view. If live data is unavailable the
+bot pauses and shows a warning (never a fake price).
 """
 
 from __future__ import annotations
@@ -21,44 +20,47 @@ from polybot.config import load_config
 from polybot.runner import BotRunner
 
 st.set_page_config(page_title="polybot — Polymarket crypto bot", layout="wide")
-
 cfg = load_config()
 
 if "runner" not in st.session_state:
     st.session_state.runner = None
 
+MODE_LIVE_PAPER = "🟢 Live Data Paper Trading (default)"
+MODE_SIM = "🧪 Simulator Test Mode"
+MODE_REAL = "🔴 Live Real Orders (real funds)"
+
 
 # --------------------------------------------------------------------------
-# Sidebar — controls
+# Sidebar
 # --------------------------------------------------------------------------
 with st.sidebar:
     st.title("⚡ polybot")
     st.caption("Polymarket short-term crypto bot (BTC/ETH 5m & 15m)")
 
-    mode_label = st.radio(
-        "Mode", ["Paper (simulated)", "Live (real markets)"],
-        help="Paper runs an offline simulator (no key). Live uses real "
-             "Binance/Coinbase data and real Polymarket markets.")
-    is_live = mode_label.startswith("Live")
-
+    mode_label = st.radio("Mode", [MODE_LIVE_PAPER, MODE_SIM, MODE_REAL], index=0,
+                          help="Live Data Paper Trading uses REAL prices/markets with "
+                               "paper fills and needs no key. Simulator is synthetic. "
+                               "Live Real Orders places real trades (needs a funded key).")
     timeframe = st.selectbox("Candle timeframe", ["1m", "5m", "15m"], index=1)
 
-    execute_orders = False
-    if is_live:
-        execute_orders = st.checkbox(
-            "Execute REAL orders (requires funded key)", value=False,
-            help="Off = real data + simulated fills (network only). "
-                 "On = place real orders with real funds.")
+    enable_real = False
+    if mode_label == MODE_REAL:
         st.caption(f"🔑 Private key in .env: {'✅ yes' if cfg.private_key else '❌ no'}")
-        if execute_orders:
-            st.warning("Real funds at risk in this mode.", icon="⚠️")
+        enable_real = st.checkbox("I understand — enable REAL orders with REAL funds", value=False)
+        if not enable_real:
+            st.info("Real orders are disabled until you tick the box above.")
+    elif mode_label == MODE_LIVE_PAPER:
+        st.caption("🔓 No private key needed. Real data, paper fills.")
     else:
-        st.caption("🔓 Paper mode needs no private key.")
+        st.caption("🧪 Synthetic prices for development/testing only.")
 
     st.divider()
-    st.subheader("Parameters")
+    st.subheader("Strategy thresholds")
+    min_edge = st.slider("Edge threshold", 0.0, 0.20, float(cfg.min_edge), 0.01)
+    min_conf = st.slider("Min confidence", 1, 6, 3, 1,
+                         help="Net agreement of trend/indicators/pattern required to trade.")
+    st.subheader("Risk")
     bankroll = st.number_input("Bankroll ($)", min_value=10.0, value=float(cfg.bankroll_usd), step=10.0)
-    min_edge = st.slider("Min edge", 0.0, 0.20, float(cfg.min_edge), 0.01)
     max_pos = st.number_input("Max position ($)", min_value=1.0, value=float(cfg.max_position_usd), step=5.0)
     kelly = st.slider("Kelly fraction", 0.05, 1.0, float(cfg.kelly_fraction), 0.05)
 
@@ -69,16 +71,26 @@ with st.sidebar:
 
 
 if start:
-    if st.session_state.runner is not None:
-        st.session_state.runner.stop()
-    cfg.bankroll_usd = bankroll
-    cfg.min_edge = min_edge
-    cfg.max_position_usd = max_pos
-    cfg.kelly_fraction = kelly
-    runner = BotRunner(cfg, mode="live" if is_live else "paper",
-                       execute_orders=execute_orders, timeframe=timeframe)
-    runner.start()
-    st.session_state.runner = runner
+    if mode_label == MODE_REAL and not enable_real:
+        st.sidebar.error("Tick the confirmation box to start real-order mode.")
+    elif mode_label == MODE_REAL and not cfg.private_key:
+        st.sidebar.error("Real orders need POLYMARKET_PRIVATE_KEY in .env.")
+    else:
+        if st.session_state.runner is not None:
+            st.session_state.runner.stop()
+        cfg.bankroll_usd = bankroll
+        cfg.min_edge = min_edge
+        cfg.max_position_usd = max_pos
+        cfg.kelly_fraction = kelly
+        runner = BotRunner(
+            cfg,
+            mode="paper" if mode_label == MODE_SIM else "live",
+            execute_orders=(mode_label == MODE_REAL and enable_real),
+            timeframe=timeframe,
+            min_confidence=min_conf,
+        )
+        runner.start()
+        st.session_state.runner = runner
 
 if stop and st.session_state.runner is not None:
     st.session_state.runner.stop()
@@ -91,74 +103,85 @@ def _hhmmss(ts):
     return datetime.fromtimestamp(ts).strftime("%H:%M:%S") if ts else "—"
 
 
-def _indicator_rows(analyses: dict) -> pd.DataFrame:
-    rows = []
-    for sym, a in analyses.items():
-        rows.append({
-            "symbol": sym, "trend": a["trend"].upper(),
-            "EMA9": f"{a['ema9']:,.2f}" if a["ema9"] else "—",
-            "EMA21": f"{a['ema21']:,.2f}" if a["ema21"] else "—",
-            "RSI14": f"{a['rsi']:.1f}" if a["rsi"] is not None else "—",
-            "MACD hist": f"{a['macd_hist']:+.2f}" if a["macd_hist"] is not None else "—",
-            "ATR": f"{a['atr']:,.2f}" if a["atr"] else "—",
-            "vol Δ%": f"{a['volume_change']:+.1f}" if a["volume_change"] is not None else "—",
-            "body %": f"{a['body_pct']:.0f}" if a["body_pct"] is not None else "—",
-            "score": f"{a['bull_score']}↑/{a['bear_score']}↓",
-        })
-    return pd.DataFrame(rows)
+def _f(x, fmt="{:.3f}", dash="—"):
+    return fmt.format(x) if x is not None else dash
 
 
-def _pattern_rows(analyses: dict) -> pd.DataFrame:
-    rows = []
-    for sym, a in analyses.items():
-        rows.append({
-            "symbol": sym,
-            "patterns": ", ".join(a["patterns"]) or "—",
-            "structure": ", ".join(k for k, v in a["structure"].items() if v) or "—",
-            "signals": ", ".join(a["signals"]) or "—",
-        })
-    return pd.DataFrame(rows)
+def _indicator_rows(analyses):
+    return pd.DataFrame([{
+        "symbol": sym, "trend": a["trend"].upper(),
+        "EMA9": _f(a["ema9"], "{:,.2f}"), "EMA21": _f(a["ema21"], "{:,.2f}"),
+        "RSI14": _f(a["rsi"], "{:.1f}"), "MACD hist": _f(a["macd_hist"], "{:+.2f}"),
+        "ATR": _f(a["atr"], "{:,.2f}"), "vol Δ%": _f(a["volume_change"], "{:+.1f}"),
+        "body %": _f(a["body_pct"], "{:.0f}"), "score": f"{a['bull_score']}↑/{a['bear_score']}↓",
+    } for sym, a in analyses.items()])
 
 
-def _opp_rows(scanned: list) -> pd.DataFrame:
-    cols = ["market", "t_left", "action", "side", "edge", "fair", "reason"]
+def _pattern_rows(analyses):
+    return pd.DataFrame([{
+        "symbol": sym,
+        "patterns": ", ".join(a["patterns"]) or "—",
+        "structure": ", ".join(k for k, v in a["structure"].items() if v) or "—",
+        "signals": ", ".join(a["signals"]) or "—",
+    } for sym, a in analyses.items()])
+
+
+def _markets_rows(scanned):
+    cols = ["market", "expiry", "YES", "NO", "spread", "liquidity"]
+    if not scanned:
+        return pd.DataFrame(columns=cols)
+    df = pd.DataFrame(scanned)
+    df["expiry"] = df["expiry"].map(_hhmmss)
+    df["YES"] = df["yes_price"].map(lambda p: _f(p))
+    df["NO"] = df["no_price"].map(lambda p: _f(p))
+    df["spread"] = df["spread"].map(lambda p: _f(p))
+    df["liquidity"] = df["liquidity"].map(lambda v: _f(v, "{:,.0f}"))
+    return df[cols]
+
+
+def _opp_rows(scanned):
+    cols = ["market", "t_left", "action", "conf", "side", "edge", "reason"]
     if not scanned:
         return pd.DataFrame(columns=cols)
     df = pd.DataFrame(scanned)
     df["t_left"] = df["seconds_left"].map(lambda s: f"{s:.0f}s")
+    df["conf"] = df.get("confidence", 0)
     df["edge"] = df["edge"].map(lambda e: f"{e:+.3f}")
-    df["fair"] = df["fair"].map(lambda f: f"{f:.3f}")
-    df["action"] = df["action"].map({"enter": "🟢 OPPORTUNITY", "possible": "🟡 possible",
-                                     "no_trade": "⚪ no trade"}).fillna(df["action"])
+    df["action"] = df["action"].map({"enter": "🟢 TRADE", "possible": "🟡 possible",
+                                     "no_trade": "⚪ NO TRADE", "ENTER": "🟢 ENTER"}).fillna(df["action"])
     return df[cols]
 
 
-def _open_rows(trades: list) -> pd.DataFrame:
-    cols = ["id", "entry", "market", "side", "size", "entry_price", "reason"]
+def _open_rows(trades):
+    cols = ["id", "entry", "market", "side", "size", "entry", "mark", "uPnL", "reason"]
     if not trades:
-        return pd.DataFrame(columns=cols)
+        return pd.DataFrame(columns=["id", "entry_time", "market", "side", "size",
+                                     "entry_price", "mark", "uPnL", "reason"])
     df = pd.DataFrame(trades)
-    df["entry"] = df["entry_time"].map(_hhmmss)
-    df["entry_price"] = df["entry_price"].map(lambda p: f"{p:.3f}")
+    df["entry_time"] = df["entry_time"].map(_hhmmss)
+    df["entry_price"] = df["entry_price"].map(lambda p: _f(p))
+    df["mark"] = df.get("mark").map(lambda p: _f(p)) if "mark" in df else "—"
+    df["uPnL"] = df.get("upnl").map(lambda p: f"{p:+.2f}") if "upnl" in df else "—"
     df["reason"] = df["reason_entry"]
-    return df[cols]
+    return df[["id", "entry_time", "market", "side", "size", "entry_price", "mark", "uPnL", "reason"]]
 
 
-def _closed_rows(trades: list) -> pd.DataFrame:
-    cols = ["entry", "close", "market", "side", "entry_price", "exit_price",
-            "pnl", "result", "reason_entry", "reason_close"]
+def _closed_rows(trades):
+    cols = ["entry", "close", "market", "side", "entry_price", "close_price",
+            "settle_spot", "pnl", "result", "reason_entry", "reason_close"]
     if not trades:
         return pd.DataFrame(columns=cols)
     df = pd.DataFrame(trades)
     df["entry"] = df["entry_time"].map(_hhmmss)
     df["close"] = df["close_time"].map(_hhmmss)
-    df["entry_price"] = df["entry_price"].map(lambda p: f"{p:.3f}")
-    df["exit_price"] = df["exit_price"].map(lambda p: f"${p:,.2f}")
+    df["entry_price"] = df["entry_price"].map(lambda p: _f(p))
+    df["close_price"] = df.get("close_price").map(lambda p: _f(p)) if "close_price" in df else "—"
+    df["settle_spot"] = df["exit_price"].map(lambda p: f"${p:,.2f}")
     df["pnl"] = df["pnl"].map(lambda p: f"{p:+.2f}")
     return df[cols]
 
 
-def _sim_scanned_rows(scanned: list) -> pd.DataFrame:
+def _sim_scanned_rows(scanned):
     cols = ["market", "t_left", "spot", "fair_up", "up_ask", "down_ask", "decision"]
     if not scanned:
         return pd.DataFrame(columns=cols)
@@ -167,53 +190,60 @@ def _sim_scanned_rows(scanned: list) -> pd.DataFrame:
     df["t_left"] = df["seconds_left"].map(lambda s: f"{s:.0f}s")
     df["spot"] = df["spot"].map(lambda s: f"${s:,.2f}")
     df["fair_up"] = df["fair_up"].map(lambda p: f"{p:.0%}")
-    df["up_ask"] = df["up_ask"].map(lambda p: f"{p:.3f}" if p is not None else "—")
-    df["down_ask"] = df["down_ask"].map(lambda p: f"{p:.3f}" if p is not None else "—")
+    df["up_ask"] = df["up_ask"].map(lambda p: _f(p))
+    df["down_ask"] = df["down_ask"].map(lambda p: _f(p))
     return df[cols]
 
 
 # --------------------------------------------------------------------------
-# main view (auto-refreshing fragment)
+# main view
 # --------------------------------------------------------------------------
 @st.fragment(run_every=1.0)
 def render_dashboard():
     runner = st.session_state.runner
-    st.title("Polymarket Crypto Bot — Live Dashboard")
+    st.title("Polymarket Crypto Bot — Dashboard")
 
     if runner is None:
-        st.info("Configure the mode and parameters in the sidebar, then press **Start**.")
+        st.info("Pick a mode in the sidebar and press **Start**. "
+                "Default is Live Data Paper Trading (real data, paper fills, no key).")
         return
 
     s = runner.snapshot()
+    live = s.mode == "live"
 
     if s.error:
         st.error(s.error)
     if s.warning:
         st.warning(s.warning, icon="⚠️")
     badge = "🟢 RUNNING" if s.running else "🔴 STOPPED"
-    st.markdown(f"**{badge}** · mode: `{s.mode}` · timeframe: `{s.timeframe}`")
+    mode_name = ("LIVE DATA PAPER TRADING" if live and not runner.execute_orders
+                 else "LIVE REAL ORDERS" if live else "SIMULATOR TEST MODE")
+    sim_flag = "TRUE" if s.simulator_active else "FALSE"
+    st.markdown(f"**{badge}** · **{mode_name}** · timeframe `{s.timeframe}` · "
+                f"simulator active: **{sim_flag}**")
 
-    live = s.mode == "live"
-
-    # ---- live data header: prices + API health ----
+    # ---- live header: prices + API health ----
     if live:
-        h1, h2, h3, h4 = st.columns(4)
-        btc = s.prices.get("BTC"); eth = s.prices.get("ETH")
+        h1, h2, h3, h4, h5 = st.columns(5)
+        btc, eth = s.prices.get("BTC"), s.prices.get("ETH")
         h1.metric("BTC (live)", f"${btc['price']:,.2f}" if btc else "—",
-                  f"upd {_hhmmss(btc['ts'])}" if btc else "no data")
+                  f"{btc['source']} · {_hhmmss(btc['ts'])}" if btc else "no data")
         h2.metric("ETH (live)", f"${eth['price']:,.2f}" if eth else "—",
-                  f"upd {_hhmmss(eth['ts'])}" if eth else "no data")
-        sok = s.spot_health.get("ok"); cok = s.candle_health.get("ok")
-        h3.metric("Spot API", "✅ ok" if sok else "❌ down",
-                  s.spot_health.get("source") or (s.spot_health.get("last_error") or "")[:24])
-        h4.metric("Candle API", "✅ ok" if cok else "❌ down",
-                  s.candle_health.get("source") or (s.candle_health.get("last_error") or "")[:24])
+                  f"{eth['source']} · {_hhmmss(eth['ts'])}" if eth else "no data")
+        h3.metric("Spot API", "✅" if s.spot_health.get("ok") else "❌",
+                  s.spot_health.get("source") or "down")
+        h4.metric("Candle API", "✅" if s.candle_health.get("ok") else "❌",
+                  s.candle_health.get("source") or "down")
+        ph = s.polymarket_health
+        h5.metric("Polymarket API", "✅" if ph.get("discover_ok") else "❌",
+                  f"{ph.get('markets', 0)} mkts")
         if not s.data_available:
-            st.error("Live data unavailable — trading is paused. No simulated prices are shown.")
+            st.error("Live data unavailable — trading is paused. "
+                     "No simulated prices are shown (simulator FALSE).")
     else:
-        st.caption("🧪 Paper mode — prices below are **simulated**, not live market data.")
+        st.caption("🧪 SIMULATOR TEST MODE — prices below are **synthetic** (not live).")
 
-    # ---- common account metrics ----
+    # ---- account metrics ----
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Balance", f"${s.equity:,.2f}", f"{s.equity - s.bankroll:+,.2f}")
     m2.metric("Total entries", s.entries)
@@ -223,36 +253,48 @@ def render_dashboard():
 
     st.subheader("📈 Equity curve")
     if len(s.equity_curve) > 1:
-        st.line_chart(pd.DataFrame({"equity ($)": s.equity_curve}), height=240)
+        st.line_chart(pd.DataFrame({"equity ($)": s.equity_curve}), height=220)
     else:
         st.caption("Waiting for the first settled trade…")
 
     if live:
-        st.subheader("📊 Indicators")
-        st.dataframe(_indicator_rows(s.analyses), hide_index=True, width="stretch")
-        st.subheader("🕯️ Patterns & structure")
-        st.dataframe(_pattern_rows(s.analyses), hide_index=True, width="stretch")
+        i1, i2 = st.columns(2)
+        with i1:
+            st.subheader("📊 Indicators")
+            st.dataframe(_indicator_rows(s.analyses), hide_index=True, width="stretch")
+        with i2:
+            st.subheader("🕯️ Patterns & structure")
+            st.dataframe(_pattern_rows(s.analyses), hide_index=True, width="stretch")
+
+        st.subheader("🎯 Polymarket markets (real)")
+        st.dataframe(_markets_rows(s.scanned), hide_index=True, width="stretch", height=200)
 
         st.subheader("🔭 Opportunity scanner")
-        st.dataframe(_opp_rows(s.scanned), hide_index=True, width="stretch", height=240)
+        st.dataframe(_opp_rows(s.scanned), hide_index=True, width="stretch", height=200)
 
-        oc1, oc2 = st.columns(2)
-        with oc1:
+        o1, o2 = st.columns(2)
+        with o1:
             st.subheader(f"📂 Open trades ({len(s.open_trades)})")
-            st.dataframe(_open_rows(s.open_trades), hide_index=True, width="stretch", height=240)
-        with oc2:
+            st.dataframe(_open_rows(s.open_trades), hide_index=True, width="stretch", height=220)
+        with o2:
             st.subheader(f"✅ Closed trades ({len(s.closed_trades)})")
-            st.dataframe(_closed_rows(s.closed_trades), hide_index=True, width="stretch", height=240)
+            st.dataframe(_closed_rows(s.closed_trades), hide_index=True, width="stretch", height=220)
 
         st.subheader("📜 Opportunity log")
-        st.dataframe(_opp_rows(list(s.opportunities)), hide_index=True, width="stretch", height=200)
+        st.dataframe(_opp_rows(list(s.opportunities)), hide_index=True, width="stretch", height=180)
+
+        with st.expander("🛠️ Debug panel (raw sources)"):
+            st.write(f"**Simulator active:** `{sim_flag}` (must be FALSE in live mode)")
+            st.write("**Spot sources (raw):**", s.debug.get("spot_raw", {}))
+            st.write("**Candle sources:**", s.debug.get("candles", {}))
+            st.write("**Polymarket API:**", s.polymarket_health)
     else:
         left, right = st.columns(2)
         with left:
-            st.subheader("🔎 Scanned markets (simulated)")
+            st.subheader("🔎 Scanned markets (synthetic)")
             st.dataframe(_sim_scanned_rows(s.scanned), hide_index=True, width="stretch", height=300)
         with right:
-            st.subheader("🧾 Recent trades (simulated)")
+            st.subheader("🧾 Recent trades (synthetic)")
             df = pd.DataFrame(s.recent_trades)
             if not df.empty:
                 df["time"] = df["time"].map(_hhmmss)
@@ -261,6 +303,9 @@ def render_dashboard():
                 df["pnl"] = df["pnl"].map(lambda p: f"{p:+.2f}")
                 df = df[["time", "market", "side", "size", "price", "status", "pnl"]]
             st.dataframe(df, hide_index=True, width="stretch", height=300)
+        with st.expander("🛠️ Debug panel"):
+            st.write(f"**Simulator active:** `{sim_flag}`")
+            st.write(s.debug)
 
     st.caption(f"Updated {datetime.now().strftime('%H:%M:%S')} · "
                "Paper/sim PnL is illustrative, not a forward-return estimate.")

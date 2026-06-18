@@ -77,13 +77,14 @@ def make_closed_trade(t: dict, exit_px: float, now: float) -> dict:
     resolved_up = exit_px > t["candle_open"]
     won = ((resolved_up and t["side"] == "UP")
            or (not resolved_up and t["side"] == "DOWN"))
-    pnl = t["size"] * (1.0 if won else 0.0) - t["size"] * t["entry_price"]
+    close_price = 1.0 if won else 0.0            # binary settlement value
+    pnl = t["size"] * close_price - t["size"] * t["entry_price"]
     return {
         "entry_time": t["entry_time"], "close_time": now,
         "market": t["market"], "symbol": t["symbol"],
         "duration_min": t["duration_min"], "side": t["side"],
-        "entry_price": t["entry_price"], "exit_price": exit_px,
-        "pnl": pnl, "result": "win" if won else "loss",
+        "entry_price": t["entry_price"], "close_price": close_price,
+        "exit_price": exit_px, "pnl": pnl, "result": "win" if won else "loss",
         "reason_entry": t["reason_entry"],
         "reason_close": (f"market resolved {'UP' if resolved_up else 'DOWN'} "
                          f"(open {t['candle_open']:,.2f} → close {exit_px:,.2f}); "
@@ -114,13 +115,16 @@ class BotState:
     # live-data fields (live mode)
     timeframe: str = "5m"
     data_available: bool = False
-    prices: Dict[str, dict] = field(default_factory=dict)        # sym -> {price, ts}
+    simulator_active: bool = False                              # TRUE only in simulator test mode
+    prices: Dict[str, dict] = field(default_factory=dict)        # sym -> {price, ts, source}
     spot_health: dict = field(default_factory=dict)
     candle_health: dict = field(default_factory=dict)
+    polymarket_health: dict = field(default_factory=dict)
     analyses: Dict[str, dict] = field(default_factory=dict)      # sym -> indicator/pattern snapshot
     open_trades: List[dict] = field(default_factory=list)
     closed_trades: List[dict] = field(default_factory=list)
     opportunities: List[dict] = field(default_factory=list)      # opportunity log (newest first)
+    debug: dict = field(default_factory=dict)                    # raw source statuses for the debug panel
 
     @property
     def settled(self) -> int:
@@ -195,12 +199,13 @@ class _SimMarket:
 
 class BotRunner:
     def __init__(self, cfg: Config, mode: str = "paper", execute_orders: bool = False,
-                 time_scale: float = 12.0, timeframe: str = "5m"):
+                 time_scale: float = 12.0, timeframe: str = "5m", min_confidence: int = 3):
         self.cfg = cfg
         self.mode = mode
         self.execute_orders = execute_orders
         self.time_scale = time_scale
         self.timeframe = timeframe
+        self.min_confidence = min_confidence
         self.state = BotState(mode=mode, bankroll=cfg.bankroll_usd,
                               equity=cfg.bankroll_usd, peak=cfg.bankroll_usd,
                               timeframe=timeframe)
@@ -248,6 +253,8 @@ class BotRunner:
             copy.opportunities = list(s.opportunities)
             copy.spot_health = dict(s.spot_health)
             copy.candle_health = dict(s.candle_health)
+            copy.polymarket_health = dict(s.polymarket_health)
+            copy.debug = dict(s.debug)
             return copy
 
     # ----- paper loop ------------------------------------------------------
@@ -357,6 +364,8 @@ class BotRunner:
         equity = self.cfg.bankroll_usd + realized
         with self._lock:
             s = self.state
+            s.simulator_active = True            # simulator test mode only
+            s.debug = {"simulator_active": True, "note": "SIMULATOR TEST MODE — synthetic prices"}
             s.entries = len(risk.open_positions)
             s.wins, s.losses = wins, losses
             s.realized = realized
@@ -420,36 +429,60 @@ class BotRunner:
                 time.sleep(poll)
                 now = time.time()
 
-                # 1) live spot + candles (REAL). No fake fallback.
+                # 1) live spot + candles (REAL, validated). No fake fallback.
                 prices, candles, analyses = {}, {}, {}
+                debug = {"simulator_active": False, "spot_raw": {}, "candles": {}}
                 data_ok = True
                 for sym in symbols:
-                    spot = feed.get_spot(sym)
+                    sr = feed.get_validated_spot(sym)          # dual-source + sanity + divergence
                     cs = feed.get_candles(sym, tf, limit=120)
-                    if spot is None or not cs:
+                    debug["spot_raw"][sym] = {
+                        "chosen": sr.price, "source": sr.source,
+                        "raw": sr.raw, "rejected": sr.rejected, "error": sr.error,
+                    }
+                    debug["candles"][sym] = {
+                        "ok": bool(cs), "count": len(cs) if cs else 0,
+                        "source": feed.candle_health.source,
+                        "last_close_time": cs[-1].close_time if cs else None,
+                        "error": None if cs else feed.candle_health.last_error,
+                    }
+                    if sr.price is None or not cs:
                         data_ok = False
                         continue
-                    prices[sym] = {"price": spot, "ts": now}
+                    prices[sym] = {"price": sr.price, "ts": now, "source": sr.source}
                     candles[sym] = cs
                     analyses[sym] = analyze(sym, tf, cs)
 
                 if not data_ok or not prices:
-                    # req 9: stop trading, warn, never use fake prices
+                    # req 9 & 10: stop trading, warn, NEVER use a fake/simulator price
+                    bad = []
+                    for sym in symbols:
+                        d = debug["spot_raw"].get(sym, {})
+                        if d.get("rejected"):
+                            bad.append(f"{sym} rejected ({d['rejected']})")
+                        elif d.get("error"):
+                            bad.append(f"{sym} spot down")
+                        if not debug["candles"].get(sym, {}).get("ok"):
+                            bad.append(f"{sym} candles down")
                     self._commit_live(
                         risk, feed, prices, analyses, open_trades, closed_trades,
-                        opp_log, tf, data_available=False,
-                        warning="Live data unavailable — trading paused. "
-                                f"spot: {feed.spot_health.last_error or 'n/a'} | "
-                                f"candles: {feed.candle_health.last_error or 'n/a'}")
+                        opp_log, tf, data_available=False, debug=debug, poly_health={},
+                        warning="Live data unavailable — trading paused. " + "; ".join(bad))
                     continue
 
                 # 2) discover Polymarket BTC/ETH 5m & 15m markets
+                poly_health = {"discover_ok": True, "markets": len(markets_cache),
+                               "book_ok": None, "error": None}
                 if now - last_discover > cfg.market_refresh_seconds or not markets_cache:
                     try:
                         markets_cache = gamma.discover(symbols, cfg.durations_minutes,
                                                        cfg.duration_tolerance_seconds)
+                        poly_health["discover_ok"] = True
+                        poly_health["markets"] = len(markets_cache)
                     except Exception as exc:  # noqa: BLE001
                         markets_cache = markets_cache or []
+                        poly_health["discover_ok"] = False
+                        poly_health["error"] = str(exc)
                         self._set_warning(f"market discovery failed: {exc}")
                     last_discover = now
 
@@ -471,17 +504,39 @@ class BotRunner:
                     try:
                         up_q = gateway.get_quote(m.up_token_id)
                         dn_q = gateway.get_quote(m.down_token_id)
-                    except Exception:  # noqa: BLE001
+                        poly_health["book_ok"] = True
+                    except Exception as exc:  # noqa: BLE001
+                        poly_health["book_ok"] = False
+                        poly_health["error"] = str(exc)
                         continue
+
+                    # real Polymarket YES/NO prices, spread and liquidity
+                    yes_price = up_q.best_ask
+                    no_price = dn_q.best_ask
+                    spread = (up_q.best_ask - up_q.best_bid) if (up_q.best_ask and up_q.best_bid) else None
+                    liquidity = sum(v for v in (up_q.ask_size, up_q.bid_size,
+                                                dn_q.ask_size, dn_q.bid_size) if v)
 
                     opp = decide_opportunity(
                         analyses[m.symbol], m.question, m.duration_minutes, sec_left,
-                        candle_open, spot, vol_ps, up_q.best_ask, dn_q.best_ask, cfg.min_edge)
+                        candle_open, spot, vol_ps, up_q.best_ask, dn_q.best_ask,
+                        cfg.min_edge, min_confidence=self.min_confidence)
+                    # mark open trades for this market to current mid
+                    if m.condition_id in open_trades:
+                        t = open_trades[m.condition_id]
+                        q = up_q if t["side"] == "UP" else dn_q
+                        mark = q.mid if q.mid is not None else q.best_bid
+                        if mark is not None:
+                            t["mark"] = mark
+                            t["upnl"] = t["size"] * (mark - t["entry_price"])
                     opp_row = {
                         "time": now, "symbol": m.symbol, "market": m.question[:48],
                         "duration_min": m.duration_minutes, "seconds_left": sec_left,
+                        "expiry": m.end_time, "yes_price": yes_price, "no_price": no_price,
+                        "spread": spread, "liquidity": liquidity,
                         "action": opp.action, "side": opp.side.value if opp.side else "—",
-                        "edge": opp.edge, "fair": opp.fair, "reason": opp.reason,
+                        "confidence": opp.confidence, "edge": opp.edge, "fair": opp.fair,
+                        "reason": opp.reason,
                     }
                     scanned.append(opp_row)
 
@@ -505,6 +560,7 @@ class BotRunner:
                                     "market": m.question[:48], "symbol": m.symbol,
                                     "duration_min": m.duration_minutes, "side": opp.side.value,
                                     "size": sig.size, "entry_price": sig.price,
+                                    "mark": sig.price, "upnl": 0.0,
                                     "candle_open": candle_open, "end_time": m.end_time,
                                     "reason_entry": opp.reason, "position": pos,
                                 }
@@ -528,8 +584,8 @@ class BotRunner:
                                               if k not in ("resolved_up", "won")})
 
                 self._commit_live(risk, feed, prices, analyses, open_trades, closed_trades,
-                                  opp_log, tf, data_available=True,
-                                  warning=None, scanned=scanned)
+                                  opp_log, tf, data_available=True, debug=debug,
+                                  poly_health=poly_health, warning=None, scanned=scanned)
         except Exception as exc:  # noqa: BLE001
             with self._lock:
                 self.state.error = f"live loop error: {exc}"
@@ -542,7 +598,8 @@ class BotRunner:
             self.state.warning = msg
 
     def _commit_live(self, risk, feed, prices, analyses, open_trades, closed_trades,
-                     opp_log, timeframe, data_available, warning, scanned=None) -> None:
+                     opp_log, timeframe, data_available, warning, scanned=None,
+                     debug=None, poly_health=None) -> None:
         closed = list(closed_trades)
         wins = sum(1 for t in closed if t["result"] == "win")
         losses = sum(1 for t in closed if t["result"] == "loss")
@@ -552,10 +609,15 @@ class BotRunner:
             s = self.state
             s.timeframe = timeframe
             s.data_available = data_available
+            s.simulator_active = False           # NEVER the simulator in live mode
             s.warning = warning
             s.prices = dict(prices)
             s.spot_health = _health_dict(feed.spot_health)
             s.candle_health = _health_dict(feed.candle_health)
+            if poly_health is not None:
+                s.polymarket_health = dict(poly_health)
+            if debug is not None:
+                s.debug = dict(debug)
             s.analyses = {sym: _analysis_dict(a) for sym, a in analyses.items()}
             s.open_trades = [_trade_view(t) for t in open_trades.values()]
             s.closed_trades = closed
