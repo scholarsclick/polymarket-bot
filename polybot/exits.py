@@ -28,26 +28,13 @@ class ExitDecision:
 
 
 def exit_levels(entry_price: float, peak_mark: Optional[float], cfg) -> dict:
-    """Compute the TP / SL / trailing price levels for display."""
-    tp = None
-    if getattr(cfg, "take_profit_price", 0) and cfg.take_profit_price > 0:
-        tp = cfg.take_profit_price
-    if getattr(cfg, "take_profit_pct", 0) and cfg.take_profit_pct > 0:
-        lvl = entry_price * (1 + cfg.take_profit_pct)
-        tp = lvl if tp is None else min(tp, lvl)   # whichever triggers first
-
-    sl = None
-    if getattr(cfg, "stop_loss_pct", 0) and cfg.stop_loss_pct > 0:
-        sl = entry_price * (1 - cfg.stop_loss_pct)
-    if getattr(cfg, "stop_loss_price", 0) and cfg.stop_loss_price > 0:
-        sl = cfg.stop_loss_price if sl is None else max(sl, cfg.stop_loss_price)
-
+    """Compute the trailing-stop price level for display. (Take-profit and
+    stop-loss were removed; trailing stop locks gains dynamically.)"""
     trail = None
     if (getattr(cfg, "trailing_stop_pct", 0) and cfg.trailing_stop_pct > 0
             and peak_mark and peak_mark > entry_price):
         trail = peak_mark * (1 - cfg.trailing_stop_pct)
-
-    return {"tp": tp, "sl": sl, "trail": trail}
+    return {"trail": trail}
 
 
 def evaluate_exit(*, side: str, entry_price: float, mark: Optional[float],
@@ -59,14 +46,6 @@ def evaluate_exit(*, side: str, entry_price: float, mark: Optional[float],
 
     gain = (mark - entry_price) / entry_price
     lv = exit_levels(entry_price, peak_mark, cfg)
-
-    if lv["tp"] is not None and mark >= lv["tp"]:
-        return ExitDecision(True, "take_profit",
-                            f"take-profit: mark {mark:.3f} ≥ {lv['tp']:.3f} (gain {gain:+.0%})")
-
-    if lv["sl"] is not None and mark <= lv["sl"]:
-        return ExitDecision(True, "stop_loss",
-                            f"stop-loss: mark {mark:.3f} ≤ {lv['sl']:.3f} (loss {gain:+.0%})")
 
     if lv["trail"] is not None and mark <= lv["trail"]:
         return ExitDecision(True, "trailing_stop",
@@ -104,7 +83,8 @@ def exit_performance(closed_trades) -> list:
         b = buckets.setdefault(et, {"exit_type": et, "count": 0, "wins": 0,
                                     "pnl": 0.0})
         b["count"] += 1
-        b["wins"] += 1 if t.get("pnl", 0) > 0 else 0
+        # a "win" means the prediction was correct (not merely that PnL > 0)
+        b["wins"] += 1 if t.get("result") == "win" else 0
         b["pnl"] += t.get("pnl", 0.0)
     rows = []
     for b in buckets.values():

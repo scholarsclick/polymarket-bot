@@ -145,6 +145,9 @@ def decide_opportunity(
     down_ask: Optional[float],
     min_edge: float,
     min_confidence: int = 2,
+    avoid_rsi_extremes: bool = False,
+    rsi_overbought: float = 80.0,
+    rsi_oversold: float = 20.0,
 ) -> Opportunity:
     """Combine trend + indicators + pattern with the market's YES/NO price.
 
@@ -179,6 +182,18 @@ def decide_opportunity(
         return Opportunity(analysis.symbol, market_name, duration_min, seconds_left,
                            "no_trade", side, fair, ask, edge, confidence,
                            "insufficient data / no book — " + base)
+
+    # intelligence: don't buy into momentum exhaustion (overbought longs /
+    # oversold shorts) — these mean-revert and trap entries.
+    if avoid_rsi_extremes and analysis.rsi is not None:
+        if side is Side.UP and analysis.rsi >= rsi_overbought:
+            return Opportunity(analysis.symbol, market_name, duration_min, seconds_left,
+                               "no_trade", side, fair, ask, edge, confidence,
+                               f"RSI overbought {analysis.rsi:.0f} — exhaustion — " + base)
+        if side is Side.DOWN and analysis.rsi <= rsi_oversold:
+            return Opportunity(analysis.symbol, market_name, duration_min, seconds_left,
+                               "no_trade", side, fair, ask, edge, confidence,
+                               f"RSI oversold {analysis.rsi:.0f} — exhaustion — " + base)
 
     if confidence >= min_confidence and edge >= min_edge:
         return Opportunity(analysis.symbol, market_name, duration_min, seconds_left,

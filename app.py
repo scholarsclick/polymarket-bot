@@ -154,7 +154,7 @@ def _opp_rows(scanned):
 
 def _open_rows(trades):
     cols = ["id", "entry", "market", "side", "size", "entry_price", "mark",
-            "uPnL", "TP", "SL", "trail", "reason"]
+            "uPnL", "trail", "reason"]
     if not trades:
         return pd.DataFrame(columns=cols)
     rows = []
@@ -163,8 +163,7 @@ def _open_rows(trades):
             "id": t.get("id"), "entry": _hhmmss(t.get("entry_time")),
             "market": t.get("market"), "side": t.get("side"), "size": t.get("size"),
             "entry_price": _f(t.get("entry_price")), "mark": _f(t.get("mark")),
-            "uPnL": f"{t.get('upnl', 0.0):+.2f}",
-            "TP": _f(t.get("tp")), "SL": _f(t.get("sl")), "trail": _f(t.get("trail")),
+            "uPnL": f"{t.get('upnl', 0.0):+.2f}", "trail": _f(t.get("trail")),
             "reason": t.get("reason_entry", ""),
         })
     return pd.DataFrame(rows)[cols]
@@ -353,12 +352,13 @@ def render_dashboard():
         o1, o2 = st.columns(2)
         with o1:
             st.subheader(f"📂 Open trades ({len(s.open_trades)})")
-            st.caption("mark = current sellable price · TP/SL/trail = live exit levels")
+            st.caption("mark = current sellable price · trail = live trailing-stop level")
             st.dataframe(_open_rows(s.open_trades), hide_index=True, width="stretch", height=220)
         with o2:
             st.subheader(f"✅ Closed trades ({len(s.closed_trades)})")
-            st.caption("exit_type: take_profit / stop_loss / trailing_stop / time_exit / "
-                       "confidence_exit / volatility_exit / resolution")
+            st.caption("result = was the PREDICTION correct (direction), not just PnL · "
+                       "exit_type: trailing_stop / time_exit / confidence_exit / "
+                       "volatility_exit / resolution")
             st.dataframe(_closed_rows(s.closed_trades), hide_index=True, width="stretch", height=220)
 
         st.subheader("🏁 Exit performance")

@@ -49,3 +49,22 @@ def test_decide_no_trade_when_weak_edge():
         candle_open=100.0, spot=100.0, vol_per_sec=0.001,
         up_ask=0.52, down_ask=0.52, min_edge=0.05)
     assert opp.action in ("no_trade", "possible")
+
+
+def test_rsi_overbought_blocks_long_entry():
+    # strong uptrend pushes RSI high; with the guard on, an UP entry is refused
+    a = analyze("BTC", "5m", _trend_candles("up"))
+    assert a.rsi is not None and a.rsi >= 70
+    opp = decide_opportunity(
+        a, "BTC up or down 5m", 5, 120.0,
+        candle_open=100.0, spot=100.6, vol_per_sec=0.0003,
+        up_ask=0.55, down_ask=0.45, min_edge=0.04,
+        avoid_rsi_extremes=True, rsi_overbought=70.0, rsi_oversold=20.0)
+    assert opp.action == "no_trade"
+    assert "overbought" in opp.reason.lower()
+    # guard off -> the same setup trades
+    opp2 = decide_opportunity(
+        a, "BTC up or down 5m", 5, 120.0,
+        candle_open=100.0, spot=100.6, vol_per_sec=0.0003,
+        up_ask=0.55, down_ask=0.45, min_edge=0.04, avoid_rsi_extremes=False)
+    assert opp2.action == "enter"

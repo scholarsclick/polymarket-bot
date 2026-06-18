@@ -56,19 +56,25 @@ daily_loss_limit_usd: 50.0         # halt new entries after this realized loss i
 max_consecutive_losses: 5          # halt new entries after this many losers in a row
 
 # --- Exits / trade management ----------------------------------------------
-# Early exits SELL the position back into the book to lock gains / cut losses,
-# instead of always holding to resolution.
+# Early exits SELL the position back into the book. (Take-profit and stop-loss
+# were removed by request — trailing stop locks gains dynamically instead.)
 enable_early_exits: true
-take_profit_price: 0.92            # take profit when the held token reaches this price
-take_profit_pct: 0.0              # OR when gain vs entry >= this fraction (0 = disabled)
-stop_loss_pct: 0.35               # stop out when loss vs entry >= this fraction (0 = disabled)
-stop_loss_price: 0.0              # OR when price <= this absolute (0 = disabled)
 trailing_stop_pct: 0.15           # exit when price falls this far from its peak (0 = disabled)
 time_exit_seconds: 30             # exit this many seconds before resolution (0 = disabled)
 confidence_exit: true             # exit if trend/indicators flip against the position
 exit_confidence_min: 2            # opposing confidence required for a confidence exit
 volatility_exit: true             # exit if volatility spikes against a losing position
 volatility_exit_mult: 3.0         # vol >= entry_vol * this triggers the volatility exit
+
+# --- Intelligence: entry quality + adaptive sizing -------------------------
+max_spread: 0.10                  # skip markets whose YES book spread exceeds this (0 = off)
+min_liquidity: 0.0                # skip markets with less than this total book size (0 = off)
+confidence_sizing: true           # scale position size by signal confidence
+confidence_sizing_min_mult: 0.5
+confidence_sizing_max_mult: 1.5
+avoid_rsi_extremes: true          # don't buy into overbought / oversold exhaustion
+rsi_overbought: 80.0
+rsi_oversold: 20.0
 
 # --- Loop ------------------------------------------------------------------
 poll_interval_seconds: 3           # how often to re-evaluate active markets

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -54,16 +55,22 @@ class Config:
 
     # exits / trade management (early exits sell the position back into the book)
     enable_early_exits: bool = True
-    take_profit_price: float = 0.92      # exit when the held token's price >= this
-    take_profit_pct: float = 0.0         # OR exit when gain vs entry >= this (0 disables)
-    stop_loss_pct: float = 0.35          # exit when loss vs entry >= this fraction (0 disables)
-    stop_loss_price: float = 0.0         # OR exit when price <= this absolute (0 disables)
     trailing_stop_pct: float = 0.15      # exit when price drops this far from peak (0 disables)
     time_exit_seconds: float = 30.0      # exit when this many seconds remain (0 disables)
     confidence_exit: bool = True         # exit if trend/indicators flip against the position
     exit_confidence_min: int = 2         # min opposing confidence to trigger a confidence exit
     volatility_exit: bool = True         # exit if volatility spikes against a losing position
     volatility_exit_mult: float = 3.0    # vol >= entry_vol * this triggers the volatility exit
+
+    # intelligence: entry-quality filters and adaptive sizing
+    max_spread: float = 0.10             # skip markets whose book spread exceeds this (0 disables)
+    min_liquidity: float = 0.0           # skip markets with less than this much book size (0 disables)
+    confidence_sizing: bool = True       # scale size by signal confidence
+    confidence_sizing_min_mult: float = 0.5
+    confidence_sizing_max_mult: float = 1.5
+    avoid_rsi_extremes: bool = True      # don't buy into overbought / oversold exhaustion
+    rsi_overbought: float = 80.0
+    rsi_oversold: float = 20.0
 
     # loop
     poll_interval_seconds: float = 3.0
@@ -105,7 +112,10 @@ def load_config(path: str = "config.yaml") -> Config:
     allowed = _known_fields()
     unknown = set(data) - allowed
     if unknown:
-        raise ValueError(f"Unknown config keys in {chosen}: {sorted(unknown)}")
+        # Ignore (don't crash) so removed/renamed keys in an existing
+        # config.yaml stay loadable.
+        logging.getLogger("polybot.config").warning(
+            "Ignoring unknown config keys in %s: %s", chosen, sorted(unknown))
 
     cfg = Config(**{k: v for k, v in data.items() if k in allowed})
 

@@ -1,6 +1,7 @@
 from polybot.config import Config
 from polybot.exits import ExitDecision, evaluate_exit, exit_levels, exit_performance
-from polybot.runner import make_early_closed_trade
+from polybot.runner import (_confidence_scale, _entry_quality_block,
+                            make_early_closed_trade)
 
 
 def _cfg(**kw):
@@ -19,34 +20,18 @@ def _eval(**kw):
     return evaluate_exit(cfg=cfg, **base)
 
 
-def test_take_profit_price():
-    cfg = _cfg(take_profit_price=0.92, stop_loss_pct=0, trailing_stop_pct=0,
-               time_exit_seconds=0, confidence_exit=False, volatility_exit=False)
-    d = _eval(mark=0.95, cfg=cfg)
-    assert d.should_exit and d.type == "take_profit"
-    assert not _eval(mark=0.80, cfg=cfg).should_exit
-
-
-def test_take_profit_pct():
-    cfg = _cfg(take_profit_price=0, take_profit_pct=0.5, stop_loss_pct=0,
-               trailing_stop_pct=0, time_exit_seconds=0,
+def test_tp_and_sl_removed():
+    # Take-profit and stop-loss were removed; only big moves no longer auto-exit.
+    cfg = _cfg(trailing_stop_pct=0, time_exit_seconds=0,
                confidence_exit=False, volatility_exit=False)
-    # entry 0.50, +50% -> 0.75
-    assert _eval(mark=0.76, cfg=cfg).type == "take_profit"
-    assert not _eval(mark=0.70, cfg=cfg).should_exit
-
-
-def test_stop_loss_pct():
-    cfg = _cfg(take_profit_price=0, stop_loss_pct=0.30, trailing_stop_pct=0,
-               time_exit_seconds=0, confidence_exit=False, volatility_exit=False)
-    # entry 0.50, -30% -> 0.35
-    d = _eval(mark=0.34, cfg=cfg)
-    assert d.should_exit and d.type == "stop_loss"
-    assert not _eval(mark=0.40, cfg=cfg).should_exit
+    assert not _eval(mark=0.99, cfg=cfg).should_exit   # would have been TP
+    assert not _eval(mark=0.10, cfg=cfg).should_exit   # would have been SL
+    assert not hasattr(cfg, "take_profit_price")
+    assert not hasattr(cfg, "stop_loss_pct")
 
 
 def test_trailing_stop():
-    cfg = _cfg(take_profit_price=0, stop_loss_pct=0, trailing_stop_pct=0.10,
+    cfg = _cfg(trailing_stop_pct=0.10,
                time_exit_seconds=0, confidence_exit=False, volatility_exit=False)
     # peak 0.90 -> trail at 0.81
     assert _eval(mark=0.80, peak_mark=0.90, cfg=cfg).type == "trailing_stop"
@@ -56,14 +41,14 @@ def test_trailing_stop():
 
 
 def test_time_exit():
-    cfg = _cfg(take_profit_price=0, stop_loss_pct=0, trailing_stop_pct=0,
+    cfg = _cfg(trailing_stop_pct=0,
                time_exit_seconds=30, confidence_exit=False, volatility_exit=False)
     assert _eval(seconds_left=25, cfg=cfg).type == "time_exit"
     assert not _eval(seconds_left=120, cfg=cfg).should_exit
 
 
 def test_confidence_exit():
-    cfg = _cfg(take_profit_price=0, stop_loss_pct=0, trailing_stop_pct=0,
+    cfg = _cfg(trailing_stop_pct=0,
                time_exit_seconds=0, confidence_exit=True, exit_confidence_min=2,
                volatility_exit=False)
     # long UP but trend flipped bearish with confidence 3
@@ -73,7 +58,7 @@ def test_confidence_exit():
 
 
 def test_volatility_exit_only_when_losing():
-    cfg = _cfg(take_profit_price=0, stop_loss_pct=0, trailing_stop_pct=0,
+    cfg = _cfg(trailing_stop_pct=0,
                time_exit_seconds=0, confidence_exit=False, volatility_exit=True,
                volatility_exit_mult=3.0)
     # vol 4x entry and position losing -> exit
@@ -82,39 +67,64 @@ def test_volatility_exit_only_when_losing():
     assert not _eval(mark=0.60, vol_per_sec=4e-6, entry_vol=1e-6, cfg=cfg).should_exit
 
 
-def test_priority_tp_before_time():
-    cfg = _cfg(take_profit_price=0.92, time_exit_seconds=30)
-    d = _eval(mark=0.95, seconds_left=10, cfg=cfg)
-    assert d.type == "take_profit"   # TP checked before time exit
+def test_priority_trailing_before_time():
+    cfg = _cfg(trailing_stop_pct=0.10, time_exit_seconds=30)
+    d = _eval(mark=0.80, peak_mark=0.90, seconds_left=10, cfg=cfg)
+    assert d.type == "trailing_stop"   # trailing checked before time exit
 
 
 def test_disabled_when_flag_off():
-    cfg = _cfg(enable_early_exits=False, take_profit_price=0.92)
-    assert not _eval(mark=0.99, cfg=cfg).should_exit
+    cfg = _cfg(enable_early_exits=False, trailing_stop_pct=0.10, time_exit_seconds=30)
+    assert not _eval(mark=0.40, peak_mark=0.90, seconds_left=5, cfg=cfg).should_exit
 
 
-def test_exit_levels():
-    cfg = _cfg(take_profit_price=0.92, stop_loss_pct=0.30, trailing_stop_pct=0.10)
+def test_exit_levels_only_trail():
+    cfg = _cfg(trailing_stop_pct=0.10)
     lv = exit_levels(0.50, 0.90, cfg)
-    assert lv["tp"] == 0.92
-    assert abs(lv["sl"] - 0.35) < 1e-9
     assert abs(lv["trail"] - 0.81) < 1e-9
+    assert "tp" not in lv and "sl" not in lv
 
 
-def test_early_close_record_and_performance():
+def test_early_close_result_is_prediction_correctness():
+    # Bought UP at 0.50, sold at 0.62 (PROFIT) but spot is BELOW the candle open
+    # -> the prediction was WRONG, so it must count as a LOSS, not a win.
     t = {"entry_time": 100, "market": "BTC 5m", "symbol": "BTC", "duration_min": 5,
          "side": "UP", "size": 20, "entry_price": 0.50, "candle_open": 100.0,
          "end_time": 400, "reason_entry": "trend bullish"}
-    rec = make_early_closed_trade(t, exit_price=0.95, now=250, exit_type="take_profit",
-                                  reason="TP hit")
-    assert rec["exit_type"] == "take_profit"
-    assert rec["close_price"] == 0.95
-    assert abs(rec["pnl"] - 20 * (0.95 - 0.50)) < 1e-9    # +9.0
-    assert rec["result"] == "win"
+    rec = make_early_closed_trade(t, exit_price=0.62, spot_at_close=99.5, now=250,
+                                  exit_type="trailing_stop", reason="trail")
+    assert rec["pnl"] > 0                 # we made money
+    assert rec["correct"] is False
+    assert rec["result"] == "loss"        # but the prediction was wrong
 
-    loss = make_early_closed_trade({**t, "entry_price": 0.60}, 0.40, 250, "stop_loss", "SL")
-    perf = exit_performance([rec, loss])
-    by = {r["exit_type"]: r for r in perf}
-    assert by["take_profit"]["wins"] == 1
-    assert by["stop_loss"]["count"] == 1
-    assert abs(by["take_profit"]["avg_pnl"] - 9.0) < 1e-9
+    # profitable AND correct (spot above open) -> win
+    win = make_early_closed_trade(t, 0.62, 100.4, 250, "time_exit", "time")
+    assert win["correct"] is True and win["result"] == "win"
+
+
+def test_exit_performance_counts_correctness_not_pnl():
+    rows = [
+        {"exit_type": "trailing_stop", "result": "loss", "pnl": 3.0},   # profit but wrong
+        {"exit_type": "trailing_stop", "result": "win", "pnl": 5.0},
+    ]
+    perf = {r["exit_type"]: r for r in exit_performance(rows)}
+    assert perf["trailing_stop"]["count"] == 2
+    assert perf["trailing_stop"]["wins"] == 1          # only the correct one
+    assert abs(perf["trailing_stop"]["pnl"] - 8.0) < 1e-9
+
+
+def test_confidence_scale_scales_size():
+    cfg = _cfg(confidence_sizing=True, exit_confidence_min=2,
+               confidence_sizing_min_mult=0.5, confidence_sizing_max_mult=1.5)
+    assert _confidence_scale(2, cfg) == 1.0     # baseline
+    assert _confidence_scale(3, cfg) == 1.5     # stronger -> capped at max
+    assert _confidence_scale(1, cfg) == 0.5     # weaker -> floored at min
+    # disabled -> always 1.0
+    assert _confidence_scale(5, _cfg(confidence_sizing=False)) == 1.0
+
+
+def test_entry_quality_block_spread_and_liquidity():
+    cfg = _cfg(max_spread=0.10, min_liquidity=100.0)
+    assert _entry_quality_block(0.20, 500, cfg)            # wide spread -> blocked
+    assert _entry_quality_block(0.02, 50, cfg)             # thin liquidity -> blocked
+    assert _entry_quality_block(0.02, 500, cfg) is None    # good book -> allowed

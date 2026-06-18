@@ -57,9 +57,12 @@ class RiskManager:
         return None
 
     # ----- sizing ----------------------------------------------------------
-    def size_signal(self, signal: Signal, available_size: Optional[float] = None) -> Signal:
+    def size_signal(self, signal: Signal, available_size: Optional[float] = None,
+                    confidence_scale: float = 1.0) -> Signal:
         """Fill in `size` and `notional` on the signal using fractional Kelly,
-        clamped by per-trade, total-exposure, and book-liquidity caps."""
+        clamped by per-trade, total-exposure, and book-liquidity caps.
+        `confidence_scale` (default 1.0) scales the Kelly notional by how strong
+        the signal is."""
         price = signal.price
         fair = signal.fair_value
         if price <= 0 or price >= 1:
@@ -70,7 +73,7 @@ class RiskManager:
         #   f* = (fair - price) / (1 - price)
         kelly = max(0.0, (fair - price) / (1.0 - price))
         bet_fraction = min(1.0, kelly * self.cfg.kelly_fraction)
-        kelly_notional = bet_fraction * self.cfg.bankroll_usd
+        kelly_notional = bet_fraction * self.cfg.bankroll_usd * max(0.0, confidence_scale)
 
         # caps
         notional = min(kelly_notional, self.cfg.max_position_usd)

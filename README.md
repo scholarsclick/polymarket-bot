@@ -166,17 +166,33 @@ losses. Each open position is marked every loop to its current sellable price
 
 | Exit | Config | Behaviour |
 |---|---|---|
-| Take profit | `take_profit_price` / `take_profit_pct` | exit when price ≥ level, or gain ≥ % |
-| Stop loss | `stop_loss_pct` / `stop_loss_price` | exit when loss ≥ %, or price ≤ level |
-| Trailing stop | `trailing_stop_pct` | exit when price falls % from its peak |
+| Trailing stop | `trailing_stop_pct` | exit when price falls % from its peak (locks gains) |
 | Time exit | `time_exit_seconds` | exit N seconds before resolution |
 | Confidence exit | `confidence_exit` | exit if trend/indicators flip against the side |
 | Volatility exit | `volatility_exit` | exit if vol spikes against a losing position |
 
-So your scenario — *buy YES at 0.50, it runs to 0.95* — now triggers a
-take-profit (default `take_profit_price: 0.92`) and books ~+0.42/share instead
-of risking a round-trip to resolution. All exit knobs live in `config.yaml`;
-set a value to `0` to disable that exit.
+> Fixed take-profit and stop-loss were **removed by request**. The **trailing
+> stop** locks profit dynamically instead: your *buy YES 0.50 → 0.90* scenario
+> rides up, sets a trailing level (e.g. 15% below the 0.90 peak ≈ 0.765), and
+> exits if it falls back to that level — capturing the move without capping it
+> early. All exit knobs live in `config.yaml`; set a value to `0` to disable.
+
+**Win/loss = prediction correctness, not just PnL.** A trade counts as a *win*
+only if the underlying moved in the predicted direction (UP bet → spot above the
+candle open; DOWN bet → below) at the moment it closed. A trade that booked a
+small profit on a bounce while the prediction was actually wrong is recorded as
+a **loss**. PnL is tracked separately, so the win rate reflects how often the
+bot is *right*, not just green.
+
+### Intelligence: entry quality & adaptive sizing
+
+- **Spread / liquidity guard** (`max_spread`, `min_liquidity`) — skips markets
+  whose book is too wide or thin to fill well; the scanner shows the skip reason.
+- **Confidence-weighted sizing** (`confidence_sizing`) — scales position size by
+  signal strength (between `confidence_sizing_min_mult` and `…_max_mult`).
+- **RSI-extreme avoidance** (`avoid_rsi_extremes`) — won't buy UP into an
+  overbought reading (`rsi_overbought`) or DOWN into oversold (`rsi_oversold`),
+  avoiding exhaustion entries that mean-revert.
 
 The dashboard shows, per open trade, the **mark price, unrealized PnL, and live
 TP / SL / trailing levels**; closed trades show the **exit type and exit

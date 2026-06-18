@@ -72,21 +72,45 @@ def _trade_view(t: dict) -> dict:
     return {k: v for k, v in t.items() if k != "position"}
 
 
-def make_early_closed_trade(t: dict, exit_price: float, now: float,
-                            exit_type: str, reason: str) -> dict:
+def make_early_closed_trade(t: dict, exit_price: float, spot_at_close: float,
+                            now: float, exit_type: str, reason: str) -> dict:
     """Closed-trade record for an EARLY exit (sold back into the book at
-    `exit_price`). PnL = size * (exit_price - entry_price)."""
+    `exit_price`). PnL = size * (exit_price - entry_price). The win/loss
+    `result` reflects whether the PREDICTION was correct (did the underlying
+    move in the predicted direction vs the candle open), NOT merely whether we
+    booked a profit — a profitable-but-wrong exit counts as a loss."""
     pnl = t["size"] * (exit_price - t["entry_price"])
+    correct = ((t["side"] == "UP" and spot_at_close > t["candle_open"])
+               or (t["side"] == "DOWN" and spot_at_close < t["candle_open"]))
     return {
         "entry_time": t["entry_time"], "close_time": now,
         "market": t["market"], "symbol": t["symbol"],
         "duration_min": t["duration_min"], "side": t["side"],
         "entry_price": t["entry_price"], "close_price": exit_price,
         "exit_price": exit_price, "pnl": pnl,
-        "result": "win" if pnl > 0 else "loss",
+        "correct": correct, "result": "win" if correct else "loss",
         "reason_entry": t["reason_entry"], "reason_close": reason,
         "exit_type": exit_type,
     }
+
+
+def _confidence_scale(confidence, cfg) -> float:
+    """Scale factor for position sizing based on signal confidence."""
+    if not getattr(cfg, "confidence_sizing", False):
+        return 1.0
+    base = max(1, getattr(cfg, "exit_confidence_min", 2))
+    lo = getattr(cfg, "confidence_sizing_min_mult", 0.5)
+    hi = getattr(cfg, "confidence_sizing_max_mult", 1.5)
+    return max(lo, min(hi, (confidence or 0) / base))
+
+
+def _entry_quality_block(spread, liquidity, cfg):
+    """Return a reason string if a market's book is too wide/thin to trade."""
+    if getattr(cfg, "max_spread", 0) and spread is not None and spread > cfg.max_spread:
+        return f"wide spread {spread:.2f}>{cfg.max_spread:.2f}"
+    if getattr(cfg, "min_liquidity", 0) and (liquidity or 0) < cfg.min_liquidity:
+        return f"illiquid {liquidity:.0f}<{cfg.min_liquidity:.0f}"
+    return None
 
 
 def make_closed_trade(t: dict, exit_px: float, now: float) -> dict:
@@ -101,7 +125,8 @@ def make_closed_trade(t: dict, exit_px: float, now: float) -> dict:
         "market": t["market"], "symbol": t["symbol"],
         "duration_min": t["duration_min"], "side": t["side"],
         "entry_price": t["entry_price"], "close_price": close_price,
-        "exit_price": exit_px, "pnl": pnl, "result": "win" if won else "loss",
+        "exit_price": exit_px, "pnl": pnl, "correct": won,
+        "result": "win" if won else "loss",
         "exit_type": "resolution",
         "reason_entry": t["reason_entry"],
         "reason_close": (f"market resolved {'UP' if resolved_up else 'DOWN'} "
@@ -562,7 +587,9 @@ class BotRunner:
                     opp = decide_opportunity(
                         a, m.question, m.duration_minutes, sec_left,
                         candle_open, spot, vol_ps, up_q.best_ask, dn_q.best_ask,
-                        cfg.min_edge, min_confidence=self.min_confidence)
+                        cfg.min_edge, min_confidence=self.min_confidence,
+                        avoid_rsi_extremes=cfg.avoid_rsi_extremes,
+                        rsi_overbought=cfg.rsi_overbought, rsi_oversold=cfg.rsi_oversold)
                     opp_row = {
                         "time": now, "symbol": m.symbol, "market": m.question[:48],
                         "duration_min": m.duration_minutes, "seconds_left": sec_left,
@@ -583,8 +610,7 @@ class BotRunner:
                             t["mark"] = mark
                             t["peak"] = max(t.get("peak", t["entry_price"]), mark)
                             t["upnl"] = t["size"] * (mark - t["entry_price"])
-                            lv = exit_levels(t["entry_price"], t["peak"], cfg)
-                            t["tp"], t["sl"], t["trail"] = lv["tp"], lv["sl"], lv["trail"]
+                            t["trail"] = exit_levels(t["entry_price"], t["peak"], cfg)["trail"]
                             decision = evaluate_exit(
                                 side=t["side"], entry_price=t["entry_price"], mark=mark,
                                 peak_mark=t["peak"], seconds_left=sec_left,
@@ -603,7 +629,8 @@ class BotRunner:
                                 else:
                                     executor.close_at(t["position"], mark, decision.type)
                                 risk.register_settlement(t["position"])
-                                rec = make_early_closed_trade(t, mark, now, decision.type, decision.reason)
+                                rec = make_early_closed_trade(t, mark, spot, now,
+                                                              decision.type, decision.reason)
                                 closed_trades.appendleft(rec)
                                 cf_watch.append({"end_time": t["end_time"],
                                                  "candle_open": t["candle_open"], "side": t["side"],
@@ -614,7 +641,12 @@ class BotRunner:
 
                     # --- entry (one per market window) ---
                     in_window = sec_left >= cfg.min_seconds_to_resolution
-                    if (opp.action == "enter" and m.condition_id not in open_trades
+                    block = _entry_quality_block(spread, liquidity, cfg)
+                    if block and opp.action == "enter":
+                        opp_row["action"] = "no_trade"
+                        opp_row["reason"] = f"skip: {block} | " + opp_row["reason"]
+                    if (opp.action == "enter" and not block
+                            and m.condition_id not in open_trades
                             and m.condition_id not in traded_markets and in_window
                             and risk.can_enter_basic() is None):
                         from .models import Signal
@@ -622,7 +654,8 @@ class BotRunner:
                                      fair_value=opp.fair, price=opp.market_price, edge=opp.edge,
                                      reason=opp.reason)
                         avail = up_q.ask_size if opp.side is Side.UP else dn_q.ask_size
-                        sig = risk.size_signal(sig, available_size=avail)
+                        scale = _confidence_scale(opp.confidence, cfg)
+                        sig = risk.size_signal(sig, available_size=avail, confidence_scale=scale)
                         if sig.size > 0:
                             pos = executor.place(sig)
                             if pos:
@@ -635,7 +668,7 @@ class BotRunner:
                                     "duration_min": m.duration_minutes, "side": opp.side.value,
                                     "size": sig.size, "entry_price": sig.price,
                                     "mark": sig.price, "peak": sig.price, "upnl": 0.0,
-                                    "entry_vol": vol_ps, "tp": None, "sl": None, "trail": None,
+                                    "entry_vol": vol_ps, "trail": None,
                                     "candle_open": candle_open, "end_time": m.end_time,
                                     "reason_entry": opp.reason, "position": pos,
                                 }
