@@ -27,7 +27,7 @@ class Config:
     durations_minutes: List[int] = field(default_factory=lambda: [5, 15])
     duration_tolerance_seconds: int = 90
     min_seconds_to_resolution: int = 25
-    max_seconds_to_resolution: int = 780
+    max_seconds_to_resolution: int = 900   # full 15m window visible/eligible
 
     # price feed
     price_sources: List[str] = field(default_factory=lambda: ["binance", "coinbase", "kraken"])

@@ -27,6 +27,51 @@ def test_classify_reasons():
     assert m is not None and why == "ok"
 
 
+def test_real_slug_window_5m_15m():
+    """Regression for the real Polymarket payload: the candle window lives in
+    the slug, not in startDate/endDate (which are creation/resolution times)."""
+    c = _client()
+    btc5 = {
+        "question": "Bitcoin Up or Down - June 18, 2:50AM-2:55AM ET",
+        "slug": "btc-updown-5m-1781765400",
+        "conditionId": "0xabc",
+        "clobTokenIds": json.dumps(["111", "222"]),
+        "outcomes": json.dumps(["Up", "Down"]),
+        "startDate": "2026-06-17T07:36:17.618973Z",   # misleading creation time
+        "endDate": "2026-06-18T06:55:00Z",
+    }
+    m, why = c.classify_market(btc5, ["BTC", "ETH"], [5, 15], 90)
+    assert m is not None and why == "ok"
+    assert m.duration_minutes == 5
+    assert int(m.start_time) == 1781765400            # from the slug
+
+    eth15 = {**btc5, "question": "Ethereum Up or Down - June 18, 2:45AM-3:00AM ET",
+             "slug": "eth-updown-15m-1781765100", "endDate": "2026-06-18T07:00:00Z"}
+    m, why = c.classify_market(eth15, ["BTC", "ETH"], [5, 15], 90)
+    assert m is not None and m.duration_minutes == 15 and m.symbol == "ETH"
+
+    # hourly strike market must stay filtered
+    strike = {**btc5, "question": "Bitcoin above 63,600 on June 18, 3AM ET?",
+              "slug": "bitcoin-above-63600-on-june-18-3am-et",
+              "outcomes": json.dumps(["Yes", "No"]), "endDate": "2026-06-18T07:00:00Z"}
+    m, why = c.classify_market(strike, ["BTC"], [5, 15], 90)
+    assert m is None and "duration" in why
+
+
+def test_title_range_window_fallback():
+    c = _client()
+    raw = {
+        "question": "Bitcoin Up or Down - June 18, 2:50AM-2:55AM ET",
+        "slug": "bitcoin-up-or-down-no-duration",   # no duration in slug
+        "conditionId": "0xabc",
+        "clobTokenIds": json.dumps(["1", "2"]),
+        "outcomes": json.dumps(["Up", "Down"]),
+        "endDate": "2026-06-18T06:55:00Z",
+    }
+    m, why = c.classify_market(raw, ["BTC"], [5, 15], 90)
+    assert m is not None and m.duration_minutes == 5   # parsed from the title range
+
+
 def test_discover_with_report(monkeypatch):
     c = _client()
     soon = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 300))

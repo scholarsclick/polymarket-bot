@@ -36,6 +36,58 @@ _DOWN_OUTCOMES = {"down", "no", "lower", "below"}
 # Title hints for these markets (used as a soft signal, not a hard requirement).
 _UPDOWN_RE = re.compile(r"up or down|higher or lower|\bup\b.*\bdown\b|up/down", re.IGNORECASE)
 
+# The real candle window lives in the slug, e.g. "btc-updown-5m-1781765400"
+# -> duration 5 minutes, start epoch 1781765400. (endDate/startDate in the API
+# payload are resolution time and series-creation time, NOT the candle window.)
+_SLUG_WINDOW_RE = re.compile(r"(?:updown|up-or-down)-(\d+)\s*m-(\d+)", re.IGNORECASE)
+# Fallback: a time range in the title, e.g. "2:50AM-2:55AM ET" -> 5 minutes.
+_TITLE_RANGE_RE = re.compile(
+    r"(\d{1,2}):(\d{2})\s*([AP]M)?\s*[-–]\s*(\d{1,2}):(\d{2})\s*([AP]M)", re.IGNORECASE)
+
+
+def _title_duration_minutes(question: str) -> Optional[int]:
+    m = _TITLE_RANGE_RE.search(question or "")
+    if not m:
+        return None
+    h1, m1, ap1, h2, m2, ap2 = m.groups()
+    ap1 = (ap1 or ap2 or "").upper()
+    ap2 = ap2.upper()
+
+    def to_min(h, mm, ap):
+        h = int(h) % 12
+        if ap == "PM":
+            h += 12
+        return h * 60 + int(mm)
+
+    t1, t2 = to_min(h1, m1, ap1), to_min(h2, m2, ap2)
+    diff = (t2 - t1) % (24 * 60)
+    return diff or None
+
+
+def _parse_window(slug: str, question: str, raw: dict
+                  ) -> Tuple[Optional[float], Optional[float], Optional[int], str]:
+    """Return (start_time, end_time, duration_min, how). Prefers the slug, then
+    a title time range, then the (often misleading) startDate/endDate pair."""
+    end_time = _parse_iso(_first(raw, "endDate", "endDateIso"))
+
+    m = _SLUG_WINDOW_RE.search(slug or "")
+    if m:
+        dur = int(m.group(1))
+        start = float(m.group(2))
+        end = end_time if end_time else start + dur * 60
+        return start, end, dur, "slug"
+
+    dur = _title_duration_minutes(question)
+    if dur is not None and end_time is not None:
+        return end_time - dur * 60, end_time, dur, "title"
+
+    start = _parse_iso(_first(raw, "startDate", "startDateIso", "gameStartTime"))
+    if start is not None and end_time is not None:
+        return start, end_time, round((end_time - start) / 60), "dates"
+
+    return None, end_time, None, "none"
+
+
 
 def _parse_iso(ts) -> Optional[float]:
     if ts is None:
@@ -138,20 +190,15 @@ class GammaClient:
             return None, f"outcomes not up/down|yes/no ({outcomes})"
         down_idx = 1 - up_idx
 
-        end_time = _parse_iso(_first(raw, "endDate", "endDateIso", "end_date_iso"))
+        # The candle window comes from the slug (or title), NOT startDate/endDate
+        # — the API's startDate is the series creation time, not the candle open.
+        start_time, end_time, duration_min, how = _parse_window(slug, question, raw)
         if end_time is None:
             return None, "no end date"
-        start_time = _parse_iso(_first(raw, "startDate", "startDateIso", "gameStartTime", "start_date_iso"))
-        inferred_start = False
-        if start_time is None:
-            start_time = end_time - min(durations_minutes) * 60
-            inferred_start = True
-
-        duration_s = end_time - start_time
-        duration_min = round(duration_s / 60)
-        if not _matches_duration(duration_s, durations_minutes, duration_tolerance_seconds):
-            extra = " (start inferred)" if inferred_start else ""
-            return None, f"duration {duration_min}m not in {durations_minutes}{extra}"
+        if duration_min is None or start_time is None:
+            return None, "cannot determine candle window"
+        if not _matches_duration(duration_min * 60, durations_minutes, duration_tolerance_seconds):
+            return None, f"duration {duration_min}m not in {durations_minutes} (via {how})"
 
         try:
             tick = float(_first(raw, "orderPriceMinTickSize", "minTickSize") or 0.01)
