@@ -128,6 +128,14 @@ shows simulator prices. The simulator lives only in its own test mode and is
 clearly flagged (`simulator active: TRUE`). In live mode the debug panel always
 shows `simulator active: FALSE`.
 
+**Trade frequency.** The sidebar has a **Symbols** picker (BTC, ETH, SOL, XRP,
+DOGE, BNB — more symbols ⇒ more markets ⇒ more trades) and a **frequency preset**
+(Balanced / Aggressive / **Max frequency ≈500/day**) that sets edge, confidence
+and spread filters, plus **max concurrent trades** and **max exposure** inputs.
+A live **pace meter** shows trades/hour and projected/day vs a 500 target, and a
+diagnostics banner shows exactly which limit is throttling entries. Looser
+filters ⇒ more trades but lower win rate — tune to taste.
+
 What live mode does:
 
 - **Real prices** — BTC & ETH spot from **Binance, falling back to Coinbase**,

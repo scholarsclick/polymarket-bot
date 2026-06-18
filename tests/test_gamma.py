@@ -163,3 +163,17 @@ def test_parse_5m_window():
     m = c.parse_market(raw, ["BTC"], [5, 15], 90)
     assert m is not None
     assert m.duration_minutes == 5
+
+
+def test_multi_symbol_discovery():
+    c = _client()
+    specs = [("Solana", "sol", "SOL"), ("XRP", "xrp", "XRP"),
+             ("Dogecoin", "doge", "DOGE"), ("BNB", "bnb", "BNB")]
+    syms = ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"]
+    for name, slug_sym, expect in specs:
+        raw = _raw(question=f"{name} Up or Down - June 18, 2:50AM-2:55AM ET",
+                   slug=f"{slug_sym}-updown-5m-1781765400",
+                   endDate="2026-06-18T06:55:00Z")
+        m, why = c.classify_market(raw, syms, [5, 15], 90)
+        assert m is not None, f"{name}: {why}"
+        assert m.symbol == expect and m.duration_minutes == 5

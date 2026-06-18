@@ -55,13 +55,34 @@ with st.sidebar:
         st.caption("🧪 Synthetic prices for development/testing only.")
 
     st.divider()
-    st.subheader("Strategy thresholds")
-    min_edge = st.slider("Edge threshold", 0.0, 0.20, float(cfg.min_edge), 0.01)
-    min_conf = st.slider("Min confidence", 1, 6, 3, 1,
-                         help="Net agreement of trend/indicators/pattern required to trade.")
+    from polybot.marketdata import SUPPORTED_SYMBOLS
+    symbols = st.multiselect(
+        "Symbols", SUPPORTED_SYMBOLS,
+        default=[s.upper() for s in cfg.symbols if s.upper() in SUPPORTED_SYMBOLS] or SUPPORTED_SYMBOLS,
+        help="More symbols = more markets = more trades.")
+
+    st.subheader("Trade frequency")
+    _PRESETS = {
+        "Balanced (quality)": dict(min_edge=0.05, min_conf=3, max_spread=0.10),
+        "Aggressive": dict(min_edge=0.03, min_conf=2, max_spread=0.15),
+        "Max frequency (≈500/day)": dict(min_edge=0.015, min_conf=2, max_spread=0.30),
+    }
+    preset = st.selectbox("Preset", list(_PRESETS) + ["Custom"], index=2)
+    if preset == "Custom":
+        min_edge = st.slider("Edge threshold", 0.0, 0.20, float(cfg.min_edge), 0.005)
+        min_conf = st.slider("Min confidence", 1, 6, 2, 1)
+        max_spread = st.slider("Max spread", 0.0, 0.50, float(cfg.max_spread), 0.05)
+    else:
+        p = _PRESETS[preset]
+        min_edge, min_conf, max_spread = p["min_edge"], p["min_conf"], p["max_spread"]
+        st.caption(f"edge ≥ {min_edge} · confidence ≥ {min_conf} · spread ≤ {max_spread}")
+
     st.subheader("Risk")
     bankroll = st.number_input("Bankroll ($)", min_value=10.0, value=float(cfg.bankroll_usd), step=10.0)
     max_pos = st.number_input("Max position ($)", min_value=1.0, value=float(cfg.max_position_usd), step=5.0)
+    max_open = st.number_input("Max concurrent trades", min_value=1, value=int(cfg.max_open_positions), step=1)
+    max_exp = st.number_input("Max total exposure ($)", min_value=1.0,
+                              value=float(cfg.max_total_exposure_usd), step=25.0)
     kelly = st.slider("Kelly fraction", 0.05, 1.0, float(cfg.kelly_fraction), 0.05)
 
     st.divider()
@@ -80,8 +101,12 @@ if start:
             st.session_state.runner.stop()
         cfg.bankroll_usd = bankroll
         cfg.min_edge = min_edge
+        cfg.max_spread = max_spread
         cfg.max_position_usd = max_pos
+        cfg.max_open_positions = int(max_open)
+        cfg.max_total_exposure_usd = max_exp
         cfg.kelly_fraction = kelly
+        cfg.symbols = symbols or cfg.symbols
         runner = BotRunner(
             cfg,
             mode="paper" if mode_label == MODE_SIM else "live",
@@ -314,7 +339,12 @@ def render_dashboard():
             open_n, max_open = d.get("open", 0), d.get("max_open", 0)
             exp, max_exp = d.get("exposure", 0), d.get("max_exposure", 0)
             skipped = d.get("skipped", {})
-            msg = (f"Scanned **{d.get('scanned', 0)}** · entry signals **{d.get('enter_signals', 0)}** · "
+            tph = d.get("trades_per_hour", 0)
+            proj = d.get("projected_per_day", 0)
+            on_track = "✅" if proj >= 500 else "🐢"
+            msg = (f"Pace: **{tph}/hr → ~{proj}/day** {on_track} (target 500) · "
+                   f"symbols **{len(d.get('symbols', []))}** · "
+                   f"scanned **{d.get('scanned', 0)}** · signals **{d.get('enter_signals', 0)}** · "
                    f"open **{open_n}/{max_open}** · exposure **${exp:.0f}/${max_exp:.0f}**")
             if skipped:
                 msg += " · skipped: " + ", ".join(f"{k}×{v}" for k, v in skipped.items())

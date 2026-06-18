@@ -24,7 +24,7 @@ class Config:
     dry_run: bool = True
 
     # markets
-    symbols: List[str] = field(default_factory=lambda: ["BTC", "ETH"])
+    symbols: List[str] = field(default_factory=lambda: ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"])
     durations_minutes: List[int] = field(default_factory=lambda: [5, 15])
     duration_tolerance_seconds: int = 90
     min_seconds_to_resolution: int = 25

@@ -28,6 +28,7 @@ _SYMBOL_KEYWORDS = {
     "SOL": ["solana", "sol"],
     "XRP": ["xrp", "ripple"],
     "DOGE": ["dogecoin", "doge"],
+    "BNB": ["bnb"],
 }
 
 _UP_OUTCOMES = {"up", "yes", "higher", "above"}

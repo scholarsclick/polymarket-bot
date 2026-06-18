@@ -456,7 +456,9 @@ class BotRunner:
                 self.state.running = False
             return
 
-        symbols = [s for s in (cfg.symbols or ["BTC", "ETH"]) if s.upper() in ("BTC", "ETH", "SOL")]
+        from .marketdata import SUPPORTED_SYMBOLS
+        symbols = [s.upper() for s in (cfg.symbols or ["BTC", "ETH"])
+                   if s.upper() in SUPPORTED_SYMBOLS]
         tf = self.timeframe
         tf_seconds = {"1m": 60, "5m": 300, "15m": 900}.get(tf, 300)
         feed = MarketDataFeed(sources=[s for s in cfg.price_sources if s in ("binance", "coinbase")]
@@ -483,6 +485,7 @@ class BotRunner:
         traded_markets: set = set()           # one entry per market window
         cf_watch: list = []                   # early-exited trades awaiting resolution
         cf_stats = {"count": 0, "early_total": 0.0, "hold_total": 0.0}  # hold-vs-early
+        entry_times: deque = deque(maxlen=5000)   # for trades/hour pacing
         markets_cache: List = []
         discovery_report: dict = {}
         last_discover = 0.0
@@ -699,6 +702,7 @@ class BotRunner:
                             if pos:
                                 risk.register_entry(pos)
                                 traded_markets.add(m.condition_id)
+                                entry_times.append(now)
                                 trade_seq += 1
                                 open_trades[m.condition_id] = {
                                     "id": trade_seq, "entry_time": now,
@@ -751,12 +755,21 @@ class BotRunner:
                     cf_stats["hold_total"] += hold_pnl
                 cf_watch[:] = still_watch
 
+                trades_last_hour = sum(1 for t in entry_times if t > now - 3600)
+                # projected/day: extrapolate the recent rate (use a shorter window
+                # early on so the figure is meaningful before an hour has elapsed)
+                elapsed = max(1.0, now - self.state.started_at)
+                rate_per_hr = (trades_last_hour if elapsed >= 3600
+                               else len(entry_times) / elapsed * 3600)
                 diag = {
                     "scanned": len(scanned), "enter_signals": enter_signals,
                     "open": len([1 for _ in open_trades]),
                     "max_open": cfg.max_open_positions,
                     "exposure": risk.current_exposure(), "max_exposure": cfg.max_total_exposure_usd,
                     "skipped": skip_tally,
+                    "trades_per_hour": round(rate_per_hr, 1),
+                    "projected_per_day": int(rate_per_hr * 24),
+                    "symbols": symbols,
                 }
                 self._commit_live(risk, feed, prices, analyses, open_trades, closed_trades,
                                   opp_log, tf, data_available=True, debug=debug,

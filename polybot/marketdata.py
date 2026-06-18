@@ -24,15 +24,22 @@ SANITY_RANGES = {
     "BTC": (1_000.0, 1_000_000.0),
     "ETH": (50.0, 100_000.0),
     "SOL": (1.0, 100_000.0),
+    "XRP": (0.01, 1_000.0),
+    "DOGE": (0.0001, 100.0),
+    "BNB": (10.0, 100_000.0),
 }
 # Max relative disagreement allowed between exchanges before we reject the tick.
 MAX_DIVERGENCE = 0.02  # 2%
 
-# our symbol -> exchange product id
+# our symbol -> exchange product id (BNB is Binance-only — not on Coinbase)
 _SPOT = {
-    "binance": {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT"},
-    "coinbase": {"BTC": "BTC-USD", "ETH": "ETH-USD", "SOL": "SOL-USD"},
+    "binance": {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT",
+                "XRP": "XRPUSDT", "DOGE": "DOGEUSDT", "BNB": "BNBUSDT"},
+    "coinbase": {"BTC": "BTC-USD", "ETH": "ETH-USD", "SOL": "SOL-USD",
+                 "XRP": "XRP-USD", "DOGE": "DOGE-USD"},
 }
+# Symbols we can trade (must have a spot feed + candles).
+SUPPORTED_SYMBOLS = ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"]
 # our timeframe -> exchange granularity
 _BINANCE_TF = {"1m": "1m", "5m": "5m", "15m": "15m"}
 _COINBASE_GRAN = {"1m": 60, "5m": 300, "15m": 900}

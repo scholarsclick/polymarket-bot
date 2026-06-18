@@ -21,7 +21,7 @@ funder: ""
 dry_run: true
 
 # --- Which markets to trade ------------------------------------------------
-symbols: ["BTC", "ETH"]            # base assets to look for in up/down markets
+symbols: ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"]   # more symbols = more markets/trades
 durations_minutes: [5, 15]         # candle lengths to trade (also tries 1, 60 if listed)
 duration_tolerance_seconds: 90     # how loosely to match a market's window to a duration
 
