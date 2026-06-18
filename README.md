@@ -100,6 +100,12 @@ python run.py run --live
 Paper trades and settlements are written to `state/paper_journal.jsonl` so you
 can review fills and PnL.
 
+## Deployment
+
+To run it 24/7 on your own machine, Docker, or a VPS (with systemd), see
+**[DEPLOY.md](DEPLOY.md)** — it covers local setup, `docker compose`, a hardened
+systemd unit, USDC funding / signature-type setup, and safe go-live steps.
+
 ## Key configuration knobs
 
 | Setting | Meaning |
