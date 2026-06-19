@@ -83,3 +83,34 @@ def test_strict_blocks_weak_but_normal_trades():
         assert normal.action == "enter"           # trades on a valid signal
     # strict can block the same setup on confidence
     assert strict.action != "enter" or strict.confidence_pct >= 95.0
+
+
+def test_bets_the_leader_not_the_emadirection():
+    # Price is BELOW the candle open (DOWN is leading) even if EMA trend is up:
+    # the bot must bet the leader (DOWN), not fight the candle.
+    a = analyze("BTC", "5m", _trend_candles("up"))   # bullish EMA trend
+    opp = decide_opportunity(
+        a, "BTC 5m", 5, 60.0, candle_open=100.0, spot=99.5, vol_per_sec=0.0008,
+        up_ask=0.40, down_ask=0.55, min_edge=0.03)
+    assert opp.side.value == "DOWN"                   # leader, not the EMA trend
+
+
+def test_requires_favourite_rejects_coinflip():
+    # spot == open -> 50/50 -> not a favourite -> no trade even if a side is cheap
+    a = analyze("BTC", "5m", _trend_candles("up"))
+    opp = decide_opportunity(
+        a, "BTC 5m", 5, 150.0, candle_open=100.0, spot=100.0, vol_per_sec=0.001,
+        up_ask=0.45, down_ask=0.45, min_edge=0.02, min_fair=0.55)
+    assert opp.action != "enter"
+    assert any("favourite" in b for b in opp.blockers)
+
+
+def test_favourite_with_edge_enters_and_reports_strength():
+    a = analyze("BTC", "5m", _trend_candles("up"))
+    opp = decide_opportunity(
+        a, "BTC 5m", 5, 40.0, candle_open=100.0, spot=100.5, vol_per_sec=0.0006,
+        up_ask=0.78, down_ask=0.25, min_edge=0.03, min_fair=0.55)
+    assert opp.side.value == "UP"
+    assert opp.fair >= 0.55 and opp.edge >= 0.03
+    assert opp.action == "enter"
+    assert opp.signal_strength > 0

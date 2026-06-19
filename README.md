@@ -128,6 +128,18 @@ shows simulator prices. The simulator lives only in its own test mode and is
 clearly flagged (`simulator active: TRUE`). In live mode the debug panel always
 shows `simulator active: FALSE`.
 
+**How it picks better trades (win-rate first).** The bot bets the **leading
+side** of the candle (the current most-likely outcome from the fair-value
+model) — it never fights the price action — and only when that side is a
+**meaningful favourite** (model probability ≥ `min_fair`, default 0.55) that the
+market is **underpricing** (edge ≥ `min_edge`). Betting underpriced *favourites*
+is what makes **wins outnumber losses** while staying +EV; a cheap bet on a 45%
+outcome is +EV but loses more than half the time, so the bot avoids it. Raise
+**Min favourite probability** in the sidebar for an even higher win rate (fewer,
+lower-paying trades); lower it for more volume. Technical trend, indicators,
+pattern and a **signal-strength** (displacement z-score) all feed the confidence
+score and shape position size.
+
 **Quality gate, not a quantity target.** There is **no** max-trades-per-hour,
 per-session, or cooldown limit — the bot takes **unlimited trades when it is
 genuinely confident** and **skips everything weak**. `max_open_positions: 0`

@@ -71,6 +71,9 @@ volatility_exit_mult: 3.0
 # Strict: enforce the confidence gate + tighter quality filters.
 strict_mode: false
 min_confidence_pct: 80.0          # confidence bar (only enforced in strict mode)
+# Win-rate filters (both modes): bet only meaningful favourites the market underprices
+min_fair: 0.55                    # chosen side's model probability must be >= this (raise for more wins)
+min_signal_strength: 0.5          # displacement z-score (only gates entry in strict mode)
 late_window_seconds: 30.0         # (strict) avoid the final N seconds…
 late_confidence_pct: 95.0         # …unless confidence is at least this high
 max_data_staleness_seconds: 30.0  # skip a symbol if its candle/price feed is stale

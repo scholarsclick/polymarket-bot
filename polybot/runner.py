@@ -618,17 +618,14 @@ class BotRunner:
                     a = analyses[m.symbol]
                     # self-learning model probability (computed first so it can
                     # feed the confidence blend in decide_opportunity)
-                    features = model_prob = None
-                    side_pre = (Side.UP if a.trend == "bullish"
-                                else Side.DOWN if a.trend == "bearish" else None)
-                    if side_pre is not None:
-                        fu = fair_up_probability(spot, candle_open, max(0.0, sec_left), vol_ps)
-                        ask_pre = up_q.best_ask if side_pre is Side.UP else dn_q.best_ask
-                        fair_pre = fu if side_pre is Side.UP else 1.0 - fu
-                        edge_pre = (fair_pre - ask_pre) if ask_pre is not None else 0.0
-                        features = featurize(a, side_pre.value, edge_pre, sec_left, m.duration_minutes)
-                        if cfg.learning_enabled:
-                            model_prob = learner.prob(features)
+                    # side = the candle's leader (matches decide_opportunity)
+                    fu = fair_up_probability(spot, candle_open, max(0.0, sec_left), vol_ps)
+                    side_pre = Side.UP if fu >= 0.5 else Side.DOWN
+                    ask_pre = up_q.best_ask if side_pre is Side.UP else dn_q.best_ask
+                    fair_pre = fu if side_pre is Side.UP else 1.0 - fu
+                    edge_pre = (fair_pre - ask_pre) if ask_pre is not None else 0.0
+                    features = featurize(a, side_pre.value, edge_pre, sec_left, m.duration_minutes)
+                    model_prob = learner.prob(features) if cfg.learning_enabled else None
 
                     opp = decide_opportunity(
                         a, m.question, m.duration_minutes, sec_left,
@@ -637,7 +634,8 @@ class BotRunner:
                         avoid_rsi_extremes=cfg.avoid_rsi_extremes,
                         rsi_overbought=cfg.rsi_overbought, rsi_oversold=cfg.rsi_oversold,
                         strict_mode=cfg.strict_mode,
-                        min_confidence_pct=cfg.min_confidence_pct, model_prob=model_prob)
+                        min_confidence_pct=cfg.min_confidence_pct, model_prob=model_prob,
+                        min_fair=cfg.min_fair, min_signal_strength=cfg.min_signal_strength)
 
                     # --- basic safety blockers (both modes) ---
                     blockers = list(opp.blockers)
@@ -666,8 +664,8 @@ class BotRunner:
                         "spread": spread, "liquidity": liquidity,
                         "action": opp.action, "side": opp.side.value if opp.side else "—",
                         "confidence": opp.confidence, "confidence_pct": opp.confidence_pct,
-                        "edge": opp.edge, "fair": opp.fair, "model": model_prob,
-                        "blockers": blockers, "reason": opp.reason,
+                        "edge": opp.edge, "fair": opp.fair, "strength": opp.signal_strength,
+                        "model": model_prob, "blockers": blockers, "reason": opp.reason,
                     }
                     scanned.append(opp_row)
 

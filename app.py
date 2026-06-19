@@ -69,6 +69,10 @@ with st.sidebar:
     min_conf_pct = st.slider("Min confidence % (strict only)", 50, 99,
                              int(cfg.min_confidence_pct), 1, disabled=not strict)
     min_edge = st.slider("Edge threshold", 0.0, 0.20, float(cfg.min_edge), 0.005)
+    min_fair = st.slider("Min favourite probability", 0.50, 0.80, float(cfg.min_fair), 0.01,
+                         help="Only bet the leading side when its model probability is at "
+                              "least this. Higher = more wins than losses (but fewer, "
+                              "lower-paying trades).")
     if strict:
         max_spread, min_liq = 0.08, 50.0
         st.caption("Strict filters: spread ≤ 0.08 · liquidity ≥ 50 · late-window guard on")
@@ -108,6 +112,7 @@ if start:
         cfg.min_liquidity = min_liq
         cfg.strict_mode = strict
         cfg.min_confidence_pct = float(min_conf_pct)
+        cfg.min_fair = float(min_fair)
         cfg.max_position_usd = max_pos
         cfg.max_total_exposure_usd = max_exp
         cfg.kelly_fraction = kelly
@@ -171,7 +176,8 @@ def _markets_rows(scanned):
 
 
 def _opp_rows(scanned):
-    cols = ["market", "t_left", "action", "conf%", "model", "side", "edge", "blockers", "reason"]
+    cols = ["market", "t_left", "action", "side", "fair", "edge", "strength",
+            "conf%", "model", "blockers"]
     if not scanned:
         return pd.DataFrame(columns=cols)
     rows = []
@@ -181,11 +187,11 @@ def _opp_rows(scanned):
         rows.append({
             "market": o.get("market"), "t_left": f"{o.get('seconds_left', 0):.0f}s",
             "action": amap.get(o.get("action"), o.get("action")),
+            "side": o.get("side"), "fair": f"{o.get('fair', 0):.2f}",
+            "edge": f"{o.get('edge', 0):+.3f}", "strength": f"{o.get('strength', 0):.1f}",
             "conf%": f"{o.get('confidence_pct', 0):.0f}%",
             "model": (f"{o['model']:.0%}" if o.get("model") is not None else "—"),
-            "side": o.get("side"), "edge": f"{o.get('edge', 0):+.3f}",
             "blockers": ", ".join(o.get("blockers", []) or []) or "—",
-            "reason": o.get("reason", ""),
         })
     return pd.DataFrame(rows)[cols]
 

@@ -67,6 +67,9 @@ class Config:
     # confidence gate + tighter quality filters.
     strict_mode: bool = False
     min_confidence_pct: float = 80.0     # confidence bar (only enforced in strict mode)
+    # win-rate filters (both modes): bet only meaningful favourites with edge
+    min_fair: float = 0.55               # chosen side's model probability must be >= this
+    min_signal_strength: float = 0.5     # displacement z-score (only gates in strict mode)
     # intelligence: entry-quality filters and adaptive sizing
     late_window_seconds: float = 30.0    # (strict) avoid the final N seconds…
     late_confidence_pct: float = 95.0    # …unless confidence is at least this high
