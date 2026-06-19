@@ -1,0 +1,28 @@
+# Run the bot 24/7 with Docker Compose.
+#
+#   cp .env.example .env            # add POLYMARKET_PRIVATE_KEY for live trading
+#   cp config.example.yaml config.yaml
+#   docker compose up -d            # paper mode by default
+#
+# To go LIVE, set `dry_run: false` in config.yaml OR override the command:
+#   docker compose run --rm bot python run.py run --live
+#
+services:
+  bot:
+    build: .
+    image: polybot:latest
+    container_name: polybot
+    restart: unless-stopped
+    env_file:
+      - .env
+    # Mount your tuned config and persist the paper/trade journal.
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./state:/app/state
+    # Default is paper mode. Uncomment to trade live with real funds:
+    # command: ["python", "run.py", "run", "--live"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

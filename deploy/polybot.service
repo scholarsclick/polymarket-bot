@@ -1,0 +1,37 @@
+# systemd unit to run the bot as a service on a Linux VPS.
+#
+# Install:
+#   sudo cp deploy/polybot.service /etc/systemd/system/polybot.service
+#   # edit User= and WorkingDirectory= and the venv path below to match your box
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now polybot
+#   journalctl -u polybot -f          # follow logs
+#
+# This runs PAPER mode by default. To trade live, append --live to ExecStart
+# (only after you've funded USDC and tested in paper).
+
+[Unit]
+Description=Polymarket short-term crypto bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=polybot
+WorkingDirectory=/opt/polymarket-bot
+# Use the venv's python so dependencies are isolated.
+ExecStart=/opt/polymarket-bot/.venv/bin/python run.py run
+Restart=on-failure
+RestartSec=10
+# Secrets are read from this file (chmod 600, owned by User above).
+EnvironmentFile=/opt/polymarket-bot/.env
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/polymarket-bot/state
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
