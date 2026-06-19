@@ -636,29 +636,28 @@ class BotRunner:
                         cfg.min_edge, min_confidence=self.min_confidence,
                         avoid_rsi_extremes=cfg.avoid_rsi_extremes,
                         rsi_overbought=cfg.rsi_overbought, rsi_oversold=cfg.rsi_oversold,
-                        high_confidence_only=cfg.high_confidence_only,
+                        strict_mode=cfg.strict_mode,
                         min_confidence_pct=cfg.min_confidence_pct, model_prob=model_prob)
 
-                    # --- runtime blockers (book quality, staleness, timing, exposure) ---
+                    # --- basic safety blockers (both modes) ---
                     blockers = list(opp.blockers)
                     if cfg.max_spread and spread is not None and spread > cfg.max_spread:
                         blockers.append("wide spread")
                     if cfg.min_liquidity and (liquidity or 0) < cfg.min_liquidity:
                         blockers.append("low liquidity")
-                    data_stale = (now - cs[-1].open_time) > (tf_seconds + cfg.max_data_staleness_seconds)
-                    if data_stale:
+                    if (now - cs[-1].open_time) > (tf_seconds + cfg.max_data_staleness_seconds):
                         blockers.append("stale data")
-                    if (sec_left < cfg.late_window_seconds
-                            and opp.confidence_pct < cfg.late_confidence_pct):
-                        blockers.append("too late")
-                    remaining_exp = cfg.max_total_exposure_usd - risk.current_exposure()
-                    if remaining_exp <= 0:
+                    if (cfg.max_total_exposure_usd and cfg.max_total_exposure_usd > 0
+                            and risk.current_exposure() >= cfg.max_total_exposure_usd):
                         blockers.append("max exposure reached")
-                    halt_now = risk.halted()
-                    if halt_now:
+                    if risk.halted():
                         blockers.append("daily stop")
                     if m.condition_id in traded_markets:
                         blockers.append("already traded")
+                    # strict-only: avoid the final seconds unless confidence is very high
+                    if (cfg.strict_mode and sec_left < cfg.late_window_seconds
+                            and opp.confidence_pct < cfg.late_confidence_pct):
+                        blockers.append("too late")
 
                     opp_row = {
                         "time": now, "symbol": m.symbol, "market": m.question[:48],
@@ -815,7 +814,7 @@ class BotRunner:
                     "skipped_opportunities": len(would_enter_markets - traded_markets),
                     "trades_per_hour": round(rate_per_hr, 1),
                     "symbols": symbols,
-                    "high_confidence_only": cfg.high_confidence_only,
+                    "strict_mode": cfg.strict_mode,
                     "min_confidence_pct": cfg.min_confidence_pct,
                     "daily_pnl": risk.realized_pnl_today,
                     "daily_limit": risk.daily_loss_limit(),

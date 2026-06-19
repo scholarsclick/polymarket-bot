@@ -51,40 +51,35 @@ def test_decide_no_trade_when_weak_edge():
     assert opp.action in ("no_trade", "possible")
 
 
-def test_rsi_overbought_blocks_long_entry():
-    # strong uptrend pushes RSI high; with the guard on, an UP entry is refused
+def test_rsi_overbought_blocks_only_in_strict():
+    # RSI extreme is a SOFT filter: it blocks in strict mode but not normal mode.
     a = analyze("BTC", "5m", _trend_candles("up"))
     assert a.rsi is not None and a.rsi >= 70
-    opp = decide_opportunity(
-        a, "BTC up or down 5m", 5, 120.0,
-        candle_open=100.0, spot=100.6, vol_per_sec=0.0003,
-        up_ask=0.55, down_ask=0.45, min_edge=0.04,
-        avoid_rsi_extremes=True, rsi_overbought=70.0, rsi_oversold=20.0)
-    assert opp.action != "enter"          # blocked from entering
-    assert any("overbought" in b.lower() for b in opp.blockers)
-    # guard off -> the same setup trades
-    opp2 = decide_opportunity(
-        a, "BTC up or down 5m", 5, 120.0,
-        candle_open=100.0, spot=100.6, vol_per_sec=0.0003,
-        up_ask=0.55, down_ask=0.45, min_edge=0.04, avoid_rsi_extremes=False)
-    assert opp2.action == "enter"
-    assert opp2.confidence_pct >= 80      # high-confidence setup
+    common = dict(candle_open=100.0, spot=100.6, vol_per_sec=0.0003,
+                  up_ask=0.55, down_ask=0.45, min_edge=0.04,
+                  avoid_rsi_extremes=True, rsi_overbought=70.0, rsi_oversold=20.0)
+    strict = decide_opportunity(a, "BTC 5m", 5, 120.0, **common, strict_mode=True)
+    assert strict.action != "enter"
+    assert any("overbought" in b.lower() for b in strict.blockers)
+    # normal mode: the same setup trades (RSI not a hard blocker)
+    normal = decide_opportunity(a, "BTC 5m", 5, 120.0, **common, strict_mode=False)
+    assert normal.action == "enter"
+    assert normal.confidence_pct >= 80    # confidence still reported
 
 
-def test_high_confidence_only_blocks_weak_setup():
-    # mild uptrend, thin edge -> below the 85% bar -> not an enter, blocker listed
+def test_strict_blocks_weak_but_normal_trades():
+    # mild uptrend with positive edge: strict mode blocks on low confidence,
+    # normal mode takes the trade.
     a = analyze("BTC", "5m", _trend_candles("up"))
-    opp = decide_opportunity(
-        a, "BTC up or down 5m", 5, 120.0,
-        candle_open=100.0, spot=100.02, vol_per_sec=0.001,
-        up_ask=0.52, down_ask=0.50, min_edge=0.03,
-        high_confidence_only=True, min_confidence_pct=85.0)
-    assert opp.action != "enter"
-    assert 0 <= opp.confidence_pct <= 100
-    # turning the gate off should not add a low-confidence blocker
-    opp2 = decide_opportunity(
-        a, "BTC up or down 5m", 5, 120.0,
-        candle_open=100.0, spot=100.02, vol_per_sec=0.001,
-        up_ask=0.52, down_ask=0.50, min_edge=0.03,
-        high_confidence_only=False)
-    assert not any("low confidence" in b for b in opp2.blockers)
+    common = dict(candle_open=100.0, spot=100.15, vol_per_sec=0.001,
+                  up_ask=0.52, down_ask=0.50, min_edge=0.03)
+    strict = decide_opportunity(a, "BTC 5m", 5, 120.0, **common,
+                                strict_mode=True, min_confidence_pct=95.0)
+    normal = decide_opportunity(a, "BTC 5m", 5, 120.0, **common, strict_mode=False)
+    assert 0 <= normal.confidence_pct <= 100      # confidence still shown
+    # normal mode should NOT block on the soft confidence/indicator filters
+    assert not any("low confidence" in b for b in normal.blockers)
+    if normal.edge >= 0.03:
+        assert normal.action == "enter"           # trades on a valid signal
+    # strict can block the same setup on confidence
+    assert strict.action != "enter" or strict.confidence_pct >= 95.0

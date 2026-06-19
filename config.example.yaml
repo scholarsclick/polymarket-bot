@@ -49,7 +49,7 @@ taker_fee_bps: 0                   # Polymarket taker fee in bps (currently 0); 
 bankroll_usd: 200.0                # assumed working capital for sizing
 kelly_fraction: 0.25               # fraction of full Kelly to bet (0.25 = quarter Kelly)
 max_position_usd: 25.0             # max notional per market
-max_total_exposure_usd: 100.0      # max notional across all open positions (REAL concurrency cap)
+max_total_exposure_usd: 0.0        # 0 = unlimited (daily stop-loss is the money cap); raise to bound it
 max_open_positions: 0              # 0 = unlimited; exposure + daily-stop are the real caps
 max_trades_per_market: 1           # one entry per market window
 daily_loss_limit_usd: 50.0         # absolute daily loss halt (used only if pct <= 0)
@@ -66,15 +66,16 @@ exit_confidence_min: 2
 volatility_exit: true
 volatility_exit_mult: 3.0
 
-# --- Intelligence: entry quality + adaptive sizing -------------------------
-# Quality gate: trade UNLIMITED when confident, skip weak setups (no count target)
-high_confidence_only: true        # only enter when trend+indicators+pattern+edge all agree
-min_confidence_pct: 80.0          # combined-confidence bar (try 80–85)
-late_window_seconds: 30.0         # avoid the final N seconds…
+# --- Trading mode + entry quality ------------------------------------------
+# Normal (default): take any valid UP/DOWN signal; confidence is informational.
+# Strict: enforce the confidence gate + tighter quality filters.
+strict_mode: false
+min_confidence_pct: 80.0          # confidence bar (only enforced in strict mode)
+late_window_seconds: 30.0         # (strict) avoid the final N seconds…
 late_confidence_pct: 95.0         # …unless confidence is at least this high
-max_data_staleness_seconds: 20.0  # skip a symbol if its candle/price feed is stale
-max_spread: 0.08                  # skip markets whose YES book spread exceeds this (0 = off)
-min_liquidity: 50.0               # skip markets with less than this total book size (0 = off)
+max_data_staleness_seconds: 30.0  # skip a symbol if its candle/price feed is stale
+max_spread: 0.20                  # skip only EXTREMELY wide books (0 = off)
+min_liquidity: 10.0               # skip only near-empty books (0 = off)
 confidence_sizing: true           # scale position size by signal confidence
 confidence_sizing_min_mult: 0.5
 confidence_sizing_max_mult: 1.5

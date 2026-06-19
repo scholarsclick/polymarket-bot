@@ -60,20 +60,27 @@ with st.sidebar:
         "Symbols", SUPPORTED_SYMBOLS, default=SUPPORTED_SYMBOLS,
         help="More symbols = more markets = more trades. All on by default.")
 
-    st.subheader("Signal quality (no trade-count target)")
-    high_conf = st.checkbox("High-confidence only", value=cfg.high_confidence_only,
-                            help="Only enter when trend + indicators + pattern + edge all "
-                                 "agree above the confidence bar. Unlimited trades when "
-                                 "confident; weak setups skipped.")
-    min_conf_pct = st.slider("Min confidence %", 50, 99, int(cfg.min_confidence_pct), 1)
+    st.subheader("Trading mode")
+    trade_mode = st.radio(
+        "Normal / Strict", ["Normal", "Strict"], index=1 if cfg.strict_mode else 0,
+        help="Normal: take any valid UP/DOWN signal; confidence is informational. "
+             "Strict: confidence gate + tighter quality filters.")
+    strict = trade_mode == "Strict"
+    min_conf_pct = st.slider("Min confidence % (strict only)", 50, 99,
+                             int(cfg.min_confidence_pct), 1, disabled=not strict)
     min_edge = st.slider("Edge threshold", 0.0, 0.20, float(cfg.min_edge), 0.005)
-    max_spread = st.slider("Max spread", 0.0, 0.50, float(cfg.max_spread), 0.01)
-    min_liq = st.number_input("Min liquidity", min_value=0.0, value=float(cfg.min_liquidity), step=10.0)
+    if strict:
+        max_spread, min_liq = 0.08, 50.0
+        st.caption("Strict filters: spread ≤ 0.08 · liquidity ≥ 50 · late-window guard on")
+    else:
+        max_spread = st.slider("Max spread (skip extreme)", 0.0, 0.50, float(cfg.max_spread), 0.01)
+        min_liq = st.number_input("Min liquidity (skip near-empty)", min_value=0.0,
+                                  value=float(cfg.min_liquidity), step=5.0)
 
     st.subheader("Risk (always enforced)")
     bankroll = st.number_input("Bankroll ($)", min_value=10.0, value=float(cfg.bankroll_usd), step=10.0)
     max_pos = st.number_input("Max position ($)", min_value=1.0, value=float(cfg.max_position_usd), step=5.0)
-    max_exp = st.number_input("Max total exposure ($)", min_value=1.0,
+    max_exp = st.number_input("Max total exposure ($, 0 = unlimited)", min_value=0.0,
                               value=float(cfg.max_total_exposure_usd), step=25.0)
     kelly = st.slider("Kelly fraction", 0.05, 1.0, float(cfg.kelly_fraction), 0.05)
     daily_stop_pct = st.slider("Daily stop-loss (% of capital)", 0, 100,
@@ -99,7 +106,7 @@ if start:
         cfg.min_edge = min_edge
         cfg.max_spread = max_spread
         cfg.min_liquidity = min_liq
-        cfg.high_confidence_only = high_conf
+        cfg.strict_mode = strict
         cfg.min_confidence_pct = float(min_conf_pct)
         cfg.max_position_usd = max_pos
         cfg.max_total_exposure_usd = max_exp
@@ -358,8 +365,8 @@ def render_dashboard():
             open_n, max_open = d.get("open", 0), d.get("max_open", "∞")
             exp, max_exp = d.get("exposure", 0), d.get("max_exposure", 0)
             blockers = d.get("blockers", {})
-            mode_txt = (f"HIGH-CONFIDENCE-ONLY ≥{d.get('min_confidence_pct', 0):.0f}%"
-                        if d.get("high_confidence_only") else "all directional setups")
+            mode_txt = (f"STRICT (conf ≥{d.get('min_confidence_pct', 0):.0f}%)"
+                        if d.get("strict_mode") else "NORMAL (any valid signal)")
             msg = (f"Mode: **{mode_txt}** · scanned **{d.get('scanned', 0)}** · "
                    f"strong signals **{d.get('enter_signals', 0)}** · "
                    f"skipped opportunities **{d.get('skipped_opportunities', 0)}** · "

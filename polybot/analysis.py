@@ -176,7 +176,7 @@ def decide_opportunity(
     avoid_rsi_extremes: bool = False,
     rsi_overbought: float = 80.0,
     rsi_oversold: float = 20.0,
-    high_confidence_only: bool = True,
+    strict_mode: bool = False,
     min_confidence_pct: float = 80.0,
     model_prob: Optional[float] = None,
 ) -> Opportunity:
@@ -209,20 +209,27 @@ def decide_opportunity(
             f"[{', '.join(analysis.signals) or 'n/a'}] patterns:{pat_names} "
             f"spot={spot:,.2f} open={candle_open:,.2f} edge={edge:+.3f} | {market_name}")
 
-    blockers = []
+    # HARD blockers — always apply (basic signal validity):
+    hard = []
     if not analysis.ok or ask is None:
-        blockers.append("insufficient data")
+        hard.append("insufficient data")
+    if edge < min_edge:
+        hard.append("weak edge")
+
+    # SOFT blockers — quality filters that only BLOCK in strict mode (in normal
+    # mode they're informational and shown, but don't stop a trade):
+    soft = []
     if pillars["indicators"] < 0.5 or pillars["pattern"] == 0.0:
-        blockers.append("conflicting indicators")
+        soft.append("conflicting indicators")
     if avoid_rsi_extremes and analysis.rsi is not None:
         if side is Side.UP and analysis.rsi >= rsi_overbought:
-            blockers.append(f"RSI overbought {analysis.rsi:.0f}")
+            soft.append(f"RSI overbought {analysis.rsi:.0f}")
         if side is Side.DOWN and analysis.rsi <= rsi_oversold:
-            blockers.append(f"RSI oversold {analysis.rsi:.0f}")
-    if edge < min_edge:
-        blockers.append("weak edge")
-    if high_confidence_only and pct < min_confidence_pct:
-        blockers.append(f"low confidence {pct:.0f}%<{min_confidence_pct:.0f}%")
+            soft.append(f"RSI oversold {analysis.rsi:.0f}")
+    if pct < min_confidence_pct:
+        soft.append(f"low confidence {pct:.0f}%<{min_confidence_pct:.0f}%")
+
+    blockers = hard + (soft if strict_mode else [])
 
     def _opp(action, reason):
         return Opportunity(analysis.symbol, market_name, duration_min, seconds_left,
@@ -230,8 +237,9 @@ def decide_opportunity(
                            confidence_pct=pct, blockers=blockers)
 
     if not blockers:
-        return _opp("enter", "✅ trend+indicators+pattern+edge agree — " + base)
-    if edge > 0 and "conflicting indicators" not in blockers and "insufficient data" not in blockers:
+        tag = "✅ all signals agree" if strict_mode else "✅ valid signal"
+        return _opp("enter", f"{tag} — " + base)
+    if edge > 0 and "insufficient data" not in blockers:
         return _opp("possible", "possible (" + ", ".join(blockers) + ") — " + base)
     return _opp("no_trade", "no trade (" + ", ".join(blockers) + ") — " + base)
 

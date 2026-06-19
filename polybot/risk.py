@@ -85,10 +85,11 @@ class RiskManager:
         bet_fraction = min(1.0, kelly * self.cfg.kelly_fraction)
         kelly_notional = bet_fraction * self.cfg.bankroll_usd * max(0.0, confidence_scale)
 
-        # caps
+        # caps (max_total_exposure_usd <= 0 means unlimited)
         notional = min(kelly_notional, self.cfg.max_position_usd)
-        remaining_exposure = self.cfg.max_total_exposure_usd - self.current_exposure()
-        notional = min(notional, max(0.0, remaining_exposure))
+        if self.cfg.max_total_exposure_usd and self.cfg.max_total_exposure_usd > 0:
+            remaining_exposure = self.cfg.max_total_exposure_usd - self.current_exposure()
+            notional = min(notional, max(0.0, remaining_exposure))
 
         size = notional / price if price > 0 else 0.0
 
